@@ -1,0 +1,4 @@
+secrets.ps1
+data/
+.venv/
+*/.venv/

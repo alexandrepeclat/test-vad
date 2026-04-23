@@ -1,0 +1,1 @@
+.\ui\.venv\Scripts\python.exe -m streamlit run .\ui\app.py
