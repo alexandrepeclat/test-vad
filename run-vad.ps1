@@ -5,8 +5,8 @@ Write-Host "Running VAD scripts on all audio files..."
 $DATA_DIR = ".\data"
 $PYANNOTE_PY = ".\vad-pyannote\.venv\Scripts\python.exe"
 $SILERO_PY   = ".\vad-silero\.venv\Scripts\python.exe"
-$PYANNOTE_SCRIPT = ".\vad-pyannote\pyannote_heatmap.py"
-$SILERO_SCRIPT   = ".\vad-silero\silero_heatmap.py"
+$PYANNOTE_SCRIPT = ".\vad-pyannote\heatmap.py"
+$SILERO_SCRIPT   = ".\vad-silero\heatmap.py"
 
 # Lookup for all files in data/ with priority: WAV > MP3
 $files_wav = Get-ChildItem $DATA_DIR -Filter *.wav
