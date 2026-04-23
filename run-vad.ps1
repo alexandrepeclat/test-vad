@@ -1,10 +1,10 @@
 . .\secrets.ps1
 
-$DATA_DIR = ".\data"
+Write-Host "Running VAD scripts on all audio files..."
 
+$DATA_DIR = ".\data"
 $PYANNOTE_PY = ".\vad-pyannote\.venv\Scripts\python.exe"
 $SILERO_PY   = ".\vad-silero\.venv\Scripts\python.exe"
-
 $PYANNOTE_SCRIPT = ".\vad-pyannote\pyannote_heatmap.py"
 $SILERO_SCRIPT   = ".\vad-silero\silero_heatmap.py"
 
@@ -20,7 +20,7 @@ foreach ($f in $files_mp3) {
 
 foreach ($f in $files_wav) {
     $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-    $allFiles[$base] = $f   # écrase mp3 si wav existe
+    $allFiles[$base] = $f
 }
 
 # Process each file with both VADs if not already done
@@ -42,3 +42,5 @@ foreach ($f in $allFiles.Values) {
         & $SILERO_PY $SILERO_SCRIPT $f.FullName --no-plot
     }
 }
+
+Write-Host "Done!"

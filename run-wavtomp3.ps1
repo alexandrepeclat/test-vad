@@ -1,5 +1,6 @@
-$DATA_DIR = ".\data"
+Write-Host "Converting WAV files to MP3 with loudness normalization..."
 
+$DATA_DIR = ".\data"
 $FFMPEG = "ffmpeg"
 
 # Lookup for all WAV files in data
@@ -35,3 +36,5 @@ foreach ($f in $files) {
             "$mp3_out"
     }
 }
+
+Write-Host "Done!"
