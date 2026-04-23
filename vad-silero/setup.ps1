@@ -1,7 +1,9 @@
+Write-Host "Setting up silero VAD environment..."
+
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install torch torchaudio numpy matplotlib scipy
+deactivate
 
-python silero_heatmap.py test-grenier.mp3
-python silero_heatmap.py test-grenier.mp3 --no-plot
+Write-Host "Done!"

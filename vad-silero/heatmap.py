@@ -1,3 +1,11 @@
+# =========================================================
+# VAD HEATMAP GENERATION (SILERO)
+#
+# .venv\Scripts\activate
+# python heatmap.py test.mp3
+# python heatmap.py test.mp3 --no-plot
+# =========================================================
+
 import argparse
 import os 
 import torch

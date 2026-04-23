@@ -1,3 +1,11 @@
+# =========================================================
+# VAD HEATMAP GENERATION (PYANNOTE)
+#
+# .venv\Scripts\activate
+# python heatmap.py test.mp3
+# python heatmap.py test.mp3 --no-plot
+# =========================================================
+
 import argparse
 import os
 import sys

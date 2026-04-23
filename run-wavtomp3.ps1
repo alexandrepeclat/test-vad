@@ -2,7 +2,7 @@ $DATA_DIR = ".\data"
 
 $FFMPEG = "ffmpeg"
 
-# Récupération des fichiers WAV
+# Lookup for all WAV files in data
 $files = Get-ChildItem $DATA_DIR -Filter *.wav
 
 foreach ($f in $files) {
@@ -11,9 +11,7 @@ foreach ($f in $files) {
 
     $mp3_out = Join-Path $DATA_DIR "$($base).mp3"
 
-    # =====================================================
     # CONVERSION + LOUDNESS NORMALIZATION
-    # =====================================================
     if (!(Test-Path $mp3_out)) {
 
         Write-Host "Converting $($f.Name) → $($base).mp3"

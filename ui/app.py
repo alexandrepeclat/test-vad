@@ -1,3 +1,10 @@
+# =========================================================
+# VAD HEATMAP VIEWER (STREAMLIT)
+#
+# .venv\Scripts\activate
+# streamlit run app.py
+# =========================================================
+
 import streamlit as st
 import numpy as np
 import os

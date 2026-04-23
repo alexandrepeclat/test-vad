@@ -26,3 +26,16 @@ $env:HF_TOKEN="xyz"
 Pour exporter sans ouvrir la fenetre matplotlib :
 .\vad-pyannote\.venv\Scripts\python.exe .\vad-pyannote\pyannote_heatmap.py test.mp3 --no-plot
 .\vad-silero\.venv\Scripts\python.exe .\vad-silero\silero_heatmap.py test.mp3 --no-plot
+
+
+# Run
+.venv\Scripts\activate
+
+
+
+# Doc
+https://github.com/pyannote/pyannote-audio
+https://github.com/snakers4/silero-vad
+
+# Alternative
+https://github.com/wiseman/py-webrtcvad
