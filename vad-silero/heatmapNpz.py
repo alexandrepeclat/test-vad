@@ -1,27 +1,56 @@
 # =========================================================
-# VAD HEATMAP GENERATION (PYANNOTE)
+# VAD HEATMAP GENERATION (SILERO)
 #
 # .venv\Scripts\activate
-# python heatmap.py test.mp3
-# python heatmap.py test.mp3 --no-plot
+# python heatmapNpz.py test.mp3
+# python heatmapNpz.py test.mp3 --no-plot
 # =========================================================
 
 import argparse
-import os
+import os 
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import subprocess
 import sys
 from pathlib import Path
-os.environ["PYANNOTE_NO_TORCHCODEC"] = "1"
-os.environ["SPEECHBRAIN_K2"] = "0"
-
-import subprocess
-import numpy as np
-import torch
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
-from pyannote.audio import Pipeline
 
 # =========================================================
-# ARGUMENT AUDIO
+# LOAD AUDIO VIA FFMPEG (robuste)
+# =========================================================
+def load_audio(path, sr=16000):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", path,
+        "-ac", "1",
+        "-ar", str(sr),
+        "-f", "f32le",
+        "-"
+    ]
+
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode())
+
+    audio = np.frombuffer(result.stdout, np.float32)
+    return audio, sr
+
+# =========================================================
+# SILERO VAD LOAD
+# =========================================================
+model, utils = torch.hub.load(
+    repo_or_dir="snakers4/silero-vad",
+    model="silero_vad",
+    trust_repo=True
+)
+
+(get_speech_timestamps, _, _, _, _) = utils
+
+# =========================================================
+# INPUT FILE
 # =========================================================
 BASE_DIR = Path.cwd()
 DATA_DIR = BASE_DIR / "data"
@@ -43,66 +72,27 @@ audio_path = DATA_DIR / audio_name
 if not audio_path.exists():
     raise FileNotFoundError(f"Audio not found: {audio_path}")
 
-# =========================================================
-# HF TOKEN
-# =========================================================
-HF_TOKEN = os.getenv("HF_TOKEN")
-if HF_TOKEN is None:
-    raise ValueError("HF_TOKEN not set. Use: $env:HF_TOKEN='xxx'")
+print("Loading audio...")
+wav, sr = load_audio(audio_path)
+
+wav = torch.tensor(wav)
 
 # =========================================================
-# LOAD AUDIO VIA FFMPEG (ROBUST + WINDOWS SAFE)
-# =========================================================
-def load_audio_ffmpeg(path, sr=16000):
-    cmd = [
-        "ffmpeg",
-        "-i", path,
-        "-ac", "1",
-        "-ar", str(sr),
-        "-f", "f32le",
-        "-"
-    ]
-
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
-    audio = np.frombuffer(result.stdout, np.float32)
-
-    return audio, sr
-
-print("Loading audio via FFmpeg...")
-audio, sr = load_audio_ffmpeg(audio_path)
-
-audio_tensor = torch.tensor(audio).unsqueeze(0)
-
-# =========================================================
-# LOAD PYANNOTE MODEL (NEW API)
-# =========================================================
-print("Loading VAD model...")
-pipeline = Pipeline.from_pretrained(
-    "pyannote/voice-activity-detection",
-    use_auth_token=HF_TOKEN
-)
-
-# =========================================================
-# RUN VAD (IN-MEMORY AUDIO → avoids decoder issues)
+# VAD
 # =========================================================
 print("Running VAD...")
-vad_result = pipeline({
-    "waveform": audio_tensor,
-    "sample_rate": sr
-})
-
-segments = vad_result.get_timeline()
+speech = get_speech_timestamps(wav, model, sampling_rate=sr)
 
 # =========================================================
-# BUILD HEATMAP (pyannote)
+# BUILD HEATMAP (Silero)
 # =========================================================
-duration = len(audio) / sr
+duration = len(wav) / sr
 t = np.linspace(0, duration, 2000)
 heat = np.zeros_like(t)
 
-for segment in segments:
-    start = segment.start
-    end = segment.end
+for seg in speech:
+    start = seg["start"] / sr
+    end = seg["end"] / sr
     heat[(t >= start) & (t <= end)] = 1.0
 
 heat = gaussian_filter1d(heat, sigma=2)
@@ -110,7 +100,7 @@ heat = gaussian_filter1d(heat, sigma=2)
 # =========================================================
 # EXPORT
 # =========================================================
-out_file = DATA_DIR / f"{audio_path.stem}_pyannote.npz"
+out_file = DATA_DIR / f"{audio_path.stem}_silero.npz"
 np.savez(
     out_file,
     t=t,
@@ -124,7 +114,7 @@ t_min = t / 60
 plt.figure(figsize=(12, 4))
 plt.plot(t_min, heat)
 
-plt.title("Speech Activity (pyannote VAD)")
+plt.title("Speech Activity (Silero VAD)")
 plt.xlabel("Time (minutes)")
 plt.ylabel("Speech activity (0–1)")
 plt.ylim(0, 1.05)

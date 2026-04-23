@@ -1,29 +1,27 @@
 # =========================================================
-# VAD HEATMAP GENERATION (SILERO)
+# SILERO VAD → CONTINUOUS SIGNAL EXPORT (JSON)
 #
-# .venv\Scripts\activate
-# python heatmap.py test.mp3
-# python heatmap.py test.mp3 --no-plot
+# Usage:
+#   python heatmapJson.py test.mp3
+#   python heatmapJson.py test.mp3 --no-plot
 # =========================================================
 
 import argparse
-import os 
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import subprocess
-import sys
+import json
 from pathlib import Path
 from scipy.ndimage import gaussian_filter1d
 
 # =========================================================
-# LOAD AUDIO VIA FFMPEG (robuste)
+# AUDIO LOADING (FFMPEG → mono float32)
 # =========================================================
 def load_audio(path, sr=16000):
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", path,
+        "ffmpeg", "-y",
+        "-i", str(path),
         "-ac", "1",
         "-ar", str(sr),
         "-f", "f32le",
@@ -38,8 +36,9 @@ def load_audio(path, sr=16000):
     audio = np.frombuffer(result.stdout, np.float32)
     return audio, sr
 
+
 # =========================================================
-# SILERO VAD LOAD
+# SILERO MODEL
 # =========================================================
 model, utils = torch.hub.load(
     repo_or_dir="snakers4/silero-vad",
@@ -49,77 +48,93 @@ model, utils = torch.hub.load(
 
 (get_speech_timestamps, _, _, _, _) = utils
 
+
 # =========================================================
-# INPUT FILE
+# CLI
 # =========================================================
 BASE_DIR = Path.cwd()
 DATA_DIR = BASE_DIR / "data"
-if not (BASE_DIR / "data").exists():
-    raise RuntimeError("Run this script from project root (folder containing /data)")
+
+if not DATA_DIR.exists():
+    raise RuntimeError("Run script from project root (must contain /data)")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("audio_name", help="Audio file name located in ./data")
-parser.add_argument(
-    "--no-plot",
-    action="store_true",
-    help="Export the heatmap without opening a matplotlib window",
-)
+parser.add_argument("audio_name", help="Audio file in ./data")
+parser.add_argument("--no-plot", action="store_true")
 args = parser.parse_args()
 
-audio_name = args.audio_name
-audio_path = DATA_DIR / audio_name
+audio_path = DATA_DIR / args.audio_name
 
 if not audio_path.exists():
     raise FileNotFoundError(f"Audio not found: {audio_path}")
 
-print("Loading audio...")
-wav, sr = load_audio(audio_path)
-
-wav = torch.tensor(wav)
 
 # =========================================================
-# VAD
+# LOAD AUDIO
+# =========================================================
+print("Loading audio...")
+wav, sr = load_audio(audio_path)
+wav = torch.tensor(wav)
+
+
+# =========================================================
+# VAD (SEGMENTS FROM MODEL)
 # =========================================================
 print("Running VAD...")
 speech = get_speech_timestamps(wav, model, sampling_rate=sr)
 
+
 # =========================================================
-# BUILD HEATMAP (Silero)
+# SIGNAL GENERATION (ARANGE GRID)
 # =========================================================
 duration = len(wav) / sr
-t = np.linspace(0, duration, 2000)
-heat = np.zeros_like(t)
+step = 0.1  # 100ms resolution (UI-friendly)
 
+t = np.arange(0, duration, step)
+p = np.zeros_like(t)
+
+# projection segments → signal
 for seg in speech:
     start = seg["start"] / sr
     end = seg["end"] / sr
-    heat[(t >= start) & (t <= end)] = 1.0
+    p[(t >= start) & (t <= end)] = 1.0
 
-heat = gaussian_filter1d(heat, sigma=2)
 
-# =========================================================
-# EXPORT
-# =========================================================
-out_file = DATA_DIR / f"{audio_path.stem}_silero.npz"
-np.savez(
-    out_file,
-    t=t,
-    heat=heat
-)
+# smoothing for nicer visualization
+p = gaussian_filter1d(p, sigma=2)
+
 
 # =========================================================
-# PLOT
+# EXPORT JSON (WAVESURFER READY)
 # =========================================================
-t_min = t / 60
-plt.figure(figsize=(12, 4))
-plt.plot(t_min, heat)
+out_file = DATA_DIR / f"{audio_path.stem}_silero.json"
 
-plt.title("Speech Activity (Silero VAD)")
-plt.xlabel("Time (minutes)")
-plt.ylabel("Speech activity (0–1)")
-plt.ylim(0, 1.05)
-plt.xlim(0, t_min.max())
-plt.xticks(np.arange(0, t_min.max() + 0.1, 15))
+data = {
+    "audio": audio_path.name,
+    "sample_rate": sr,
+    "step": step,
+    "t": t.tolist(),
+    "p": p.tolist()
+}
 
+with open(out_file, "w", encoding="utf-8") as f:
+    json.dump(data, f)
+
+print(f"Saved: {out_file}")
+
+
+# =========================================================
+# PLOT (OPTIONAL DEBUG)
+# =========================================================
 if not args.no_plot:
+    t_min = t / 60
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(t_min, p)
+
+    plt.title("Silero VAD - Speech Activity")
+    plt.xlabel("Time (minutes)")
+    plt.ylabel("Speech probability (0–1)")
+    plt.ylim(0, 1.05)
+
     plt.show()
