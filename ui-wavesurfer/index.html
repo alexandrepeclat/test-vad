@@ -5,8 +5,6 @@
     <meta charset="utf-8" />
     <title>VAD Viewer</title>
 
-<script src="https://unpkg.com/wavesurfer.js@6"></script>
-<script src="https://unpkg.com/wavesurfer.js@6/dist/plugin/wavesurfer.spectrogram.min.js"></script>
     <style>
         body {
             font-family: sans-serif;
@@ -32,19 +30,7 @@
             background: #eee;
         }
 
-        #graphs {
-            width: 100%;
-        }
-
-        #waveform {
-            width: 100%;
-        }
-
-        #vadgraph {
-            pointer-events: none;
-        }
-
-        #spectrogram {
+        #graphs, #graphs > * {
             width: 100%;
         }
 
@@ -53,6 +39,7 @@
         }
     </style>
 </head>
+
 <body>
     <h2>VAD Viewer</h2>
     <div id="container">
@@ -63,13 +50,18 @@
                 <label><input type="checkbox" id="silToggle" checked> Silero</label>
                 <button id="invertBtn">Invert</button>
             </div>
+            <div id="timeDisplay" style="margin-top:10px; font-family: monospace;">
+                -
+            </div>
         </div>
         <div id="graphs">
             <div id="waveform"></div>
             <canvas id="vadgraph"></canvas>
             <div id="spectrogram"></div>
+            <div id="wave-timeline"></div>
         </div>
     </div>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
+
 </html>
