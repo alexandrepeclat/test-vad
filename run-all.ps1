@@ -2,6 +2,7 @@
 & "./run-sd-copy.ps1"
 & "./run-wavtomp3.ps1"
 
+& "./run-meta-json.ps1"
 & "./run-vad-json.ps1"
 & "./run-ui-wavesurfer.ps1"
 
