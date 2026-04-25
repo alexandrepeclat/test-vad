@@ -3,19 +3,20 @@ Write-Host "Converting WAV files to MP3 with loudness normalization..."
 $DATA_DIR = ".\data"
 $FFMPEG = "ffmpeg"
 
-# Lookup for all WAV files in data
-$files = Get-ChildItem $DATA_DIR -Filter *.wav
+# Get all WAV files recursively
+$files = Get-ChildItem $DATA_DIR -Recurse -Filter *.wav
 
 foreach ($f in $files) {
 
     $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
 
-    $mp3_out = Join-Path $DATA_DIR "$($base).mp3"
+    # Output MP3 in the SAME folder as the source file
+    $mp3_out = Join-Path $f.DirectoryName "$base.mp3"
 
-    # CONVERSION + LOUDNESS NORMALIZATION
+    # Skip if already exists
     if (!(Test-Path $mp3_out)) {
 
-        Write-Host "Converting $($f.Name) → $($base).mp3"
+        Write-Host "Converting $($f.FullName) → $mp3_out"
 
         # -------------------------------------------------
         # loudnorm params (EBU R128)
@@ -31,8 +32,9 @@ foreach ($f in $files) {
         # -------------------------------------------------
 
         & $FFMPEG -i "$($f.FullName)" `
-            -af "loudnorm=I=-16:TP=-1.5:LRA=11" `
-            -vn -acodec libmp3lame -b:a 192k `
+            -hide_banner -loglevel info `
+            -af "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=32000,pan=mono|c0=0.5*c0+0.5*c1" `
+            -vn -acodec libmp3lame -b:a 128k `
             "$mp3_out"
     }
 }

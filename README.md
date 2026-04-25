@@ -34,6 +34,8 @@ Pour exporter sans ouvrir la fenetre matplotlib :
 
 
 # Doc
+https://zoomcorp.com/manuals/m4-en/
+
 https://github.com/pyannote/pyannote-audio
 https://github.com/snakers4/silero-vad
 
