@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>VAD Viewer</title>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        #container {
+            display: flex;
+            gap: 20px;
+        }
+
+        #fileList {
+            width: 200px;
+            padding-left: 12px;
+        }
+
+        #fileList li {
+            cursor: pointer;
+            padding: 2px;
+        }
+
+        #fileList li:hover {
+            background: #eee;
+        }
+
+        #graphs, #graphs > * {
+            width: 100%;
+        }
+
+        .controls {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>VAD Viewer</h2>
+    <div id="container">
+        <div id="controls">
+            <ul id="fileList"></ul>
+            <div>
+                <label><input type="checkbox" id="pyToggle" checked> Pyannote</label>
+                <label><input type="checkbox" id="silToggle" checked> Silero</label>
+                <button id="invertBtn">Invert</button>
+            </div>
+            <div id="timeDisplay" style="margin-top:10px; font-family: monospace;">
+                -
+            </div>
+        </div>
+        <div id="graphs">
+            <div id="waveform"></div>
+            <canvas id="vadgraph"></canvas>
+            <div id="spectrogram"></div>
+            <div id="wave-timeline"></div>
+        </div>
+    </div>
+    <script type="module" src="client.js"></script>
+</body>
+
+</html>
