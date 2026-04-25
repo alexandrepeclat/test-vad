@@ -8,38 +8,45 @@ $SILERO_PY   = ".\vad-silero\.venv\Scripts\python.exe"
 $PYANNOTE_SCRIPT = ".\vad-pyannote\heatmapJson.py"
 $SILERO_SCRIPT   = ".\vad-silero\heatmapJson.py"
 
-# Lookup for all files in data/ with priority: WAV > MP3
-$files_wav = Get-ChildItem $DATA_DIR -Filter *.wav
-$files_mp3 = Get-ChildItem $DATA_DIR -Filter *.mp3
+# Get all audio files recursively
+$files_wav = Get-ChildItem $DATA_DIR -Recurse -Filter *.wav
+$files_mp3 = Get-ChildItem $DATA_DIR -Recurse -Filter *.mp3
+
+# Dictionary (key = full path without extension)
 $allFiles = @{}
 
+# MP3 first (lower priority)
 foreach ($f in $files_mp3) {
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-    $allFiles[$base] = $f
+    $key = [System.IO.Path]::ChangeExtension($f.FullName, $null)
+    $allFiles[$key] = $f
 }
 
+# WAV overrides MP3 (higher priority)
 foreach ($f in $files_wav) {
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-    $allFiles[$base] = $f
+    $key = [System.IO.Path]::ChangeExtension($f.FullName, $null)
+    $allFiles[$key] = $f
 }
 
-# Process each file with both VADs if not already done
+# Process files
 foreach ($f in $allFiles.Values) {
 
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-    $pyannote_json = Join-Path $DATA_DIR "$($base)_pyannote.json"
-    $silero_json   = Join-Path $DATA_DIR "$($base)_silero.json"
+    $inputPath = $f.FullName
+    $base = $f.BaseName
+    $folder = $f.DirectoryName
+
+    $pyannote_json = Join-Path $folder "${base}_pyannote.json"
+    $silero_json   = Join-Path $folder "${base}_silero.json"
 
     # PYANNOTE
     if (!(Test-Path $pyannote_json)) {
-        Write-Host "Running pyannote for $($f.Name) → $($base)_pyannote.json"
-        & $PYANNOTE_PY $PYANNOTE_SCRIPT $f.FullName --no-plot
+        Write-Host "Pyannote -> $inputPath -> $pyannote_json"
+        & $PYANNOTE_PY $PYANNOTE_SCRIPT "$inputPath"
     }
 
     # SILERO
     if (!(Test-Path $silero_json)) {
-        Write-Host "Running silero for $($f.Name) → $($base)_silero.json"
-        & $SILERO_PY $SILERO_SCRIPT $f.FullName --no-plot
+        Write-Host "Silero -> $inputPath -> $silero_json"
+        & $SILERO_PY $SILERO_SCRIPT "$inputPath"
     }
 }
 

@@ -2,9 +2,21 @@
 # SILERO VAD → CONTINUOUS SIGNAL EXPORT (JSON)
 #
 # Usage:
-#   python heatmapJson.py test.mp3
-#   python heatmapJson.py test.mp3 --no-plot
+#   python heatmapJson.py path/to/audio.wav
+#   python heatmapJson.py path/to/audio.mp3 --plot
 # =========================================================
+
+import os
+import warnings
+import logging
+warnings.filterwarnings("ignore")
+logging.getLogger("torch").setLevel(logging.ERROR)
+logging.getLogger("torchaudio").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+os.environ["PYTHONWARNINGS"] = "ignore"
+os.environ["TORCH_SHOW_CPP_STACKTRACES"] = "0"
+os.environ["LIGHTNING_LOG_LEVEL"] = "ERROR"
 
 import argparse
 import torch
@@ -52,18 +64,12 @@ model, utils = torch.hub.load(
 # =========================================================
 # CLI
 # =========================================================
-BASE_DIR = Path.cwd()
-DATA_DIR = BASE_DIR / "data"
-
-if not DATA_DIR.exists():
-    raise RuntimeError("Run script from project root (must contain /data)")
-
 parser = argparse.ArgumentParser()
-parser.add_argument("audio_name", help="Audio file in ./data")
-parser.add_argument("--no-plot", action="store_true")
+parser.add_argument("audio_path", help="Path to audio file (wav/mp3)")
+parser.add_argument("--plot", action="store_true", help="Show debug plot")
 args = parser.parse_args()
 
-audio_path = DATA_DIR / args.audio_name
+audio_path = Path(args.audio_path)
 
 if not audio_path.exists():
     raise FileNotFoundError(f"Audio not found: {audio_path}")
@@ -93,21 +99,18 @@ step = 0.1  # 100ms resolution (UI-friendly)
 t = np.arange(0, duration, step)
 p = np.zeros_like(t)
 
-# projection segments → signal
 for seg in speech:
     start = seg["start"] / sr
     end = seg["end"] / sr
     p[(t >= start) & (t <= end)] = 1.0
 
-
-# smoothing for nicer visualization
 p = gaussian_filter1d(p, sigma=2)
 
 
 # =========================================================
-# EXPORT JSON (WAVESURFER READY)
+# EXPORT JSON (NEXT TO INPUT FILE)
 # =========================================================
-out_file = DATA_DIR / f"{audio_path.stem}_silero.json"
+out_file = audio_path.with_name(f"{audio_path.stem}_silero.json")
 
 data = {
     "audio": audio_path.name,
@@ -126,7 +129,7 @@ print(f"Saved: {out_file}")
 # =========================================================
 # PLOT (OPTIONAL DEBUG)
 # =========================================================
-if not args.no_plot:
+if args.plot:
     t_min = t / 60
 
     plt.figure(figsize=(12, 4))
