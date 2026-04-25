@@ -1,5 +1,4 @@
 import WaveSurfer from 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js'
-import Spectrogram from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/spectrogram.esm.js'
 import Timeline from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/timeline.esm.js'
 
 const wavesurfer = WaveSurfer.create({
@@ -11,12 +10,6 @@ const wavesurfer = WaveSurfer.create({
     partialRender: true,
 
     plugins: [
-        Spectrogram.create({
-            container: '#spectrogram',
-            labels: true,
-            height: 150,
-            fftSamples: 256
-        }),
         Timeline.create({
             container: '#wave-timeline'
         })
@@ -80,8 +73,10 @@ async function loadFile(file) {
     const audio = `/data/${file}`;
     const pyUrl = `/data/${base}_pyannote.json`;
     const silUrl = `/data/${base}_silero.json`;
+    const spectroUrl = `/data/${base}_spectrogram.png`;
 
     clear(); // clear curves while loading new file
+
     Promise.all([
         fetch(pyUrl).then(r => r.json()),
         fetch(silUrl).then(r => r.json())
@@ -90,6 +85,11 @@ async function loadFile(file) {
         data.sil = sil;
         draw();
     });
+
+    // -------------------------
+    // SPECTROGRAM IMAGE LOAD
+    // -------------------------
+    spectroImg.src = spectroUrl;
 
     wavesurfer.load(audio);
 }
@@ -109,15 +109,51 @@ function resizeCanvas() {
 }
 
 // -------------------------
+// SPECTROGRAM IMAGE SETUP
+// -------------------------
+const spectroContainer = document.getElementById('spectrogram');
+
+let spectroImg = document.createElement('img');
+spectroImg.style.width = '100%';
+spectroImg.style.height = '150px';
+spectroImg.style.objectFit = 'fill';
+
+spectroContainer.appendChild(spectroImg);
+
+// -------------------------
 // DRAW CURVES
 // -------------------------
 function drawCurve(t, p, color) {
     if (!t) return;
 
-    ctx.strokeStyle = color;
-    ctx.beginPath();
-
     const maxT = t[t.length - 1];
+
+    // -------------------------
+    // FILL
+    // -------------------------
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = color;
+
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height);
+
+    for (let i = 0; i < t.length; i++) {
+        const x = (t[i] / maxT) * canvas.width;
+        const y = canvas.height - (p[i] * canvas.height);
+        ctx.lineTo(x, y);
+    }
+
+    ctx.lineTo(canvas.width, canvas.height);
+    ctx.closePath();
+    ctx.fill();
+
+    // -------------------------
+    // LINE
+    // -------------------------
+    ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = color;
+
+    ctx.beginPath();
 
     for (let i = 0; i < t.length; i++) {
         const x = (t[i] / maxT) * canvas.width;
@@ -136,6 +172,7 @@ function drawCurve(t, p, color) {
 function clear() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
+
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!data.py || !data.sil) return;

@@ -27,9 +27,15 @@ foreach ($f in $files_wav) {
 
 # Process files
 foreach ($f in $allFiles.Values) {
+
+    $outFile = Join-Path $f.DirectoryName "$($f.BaseName)_spectrogram.png"
+    if (Test-Path $outFile) {
+        continue
+    }
+
     $inputPath = $f.FullName
     Write-Host "Spectrogram -> $inputPath"
-    & $TOOLS_PY $SPECTRO_SCRIPT "$inputPath"
+    & $TOOLS_PY $SPECTRO_SCRIPT "$inputPath" "$outFile"
 }
 
 Write-Host "Done!"
