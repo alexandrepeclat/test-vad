@@ -33,7 +33,7 @@ foreach ($f in $files) {
 
         & $FFMPEG -i "$($f.FullName)" `
             -hide_banner -loglevel info `
-            -af "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=32000,pan=mono|c0=0.5*c0+0.5*c1" `
+            -af "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=16000,pan=mono|c0=0.5*c0+0.5*c1" `
             -vn -acodec libmp3lame -b:a 128k `
             "$mp3_out"
     }

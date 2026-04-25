@@ -4,7 +4,7 @@
 
 & "./run-meta-json.ps1"
 & "./run-vad-json.ps1"
-& "./run-ui-wavesurfer.ps1"
+& "./run-ui.ps1"
 
 #& "./run-vad-npz.ps1"
 #& "./run-ui.ps1"

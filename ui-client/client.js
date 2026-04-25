@@ -15,7 +15,7 @@ const wavesurfer = WaveSurfer.create({
             container: '#spectrogram',
             labels: true,
             height: 150,
-            fftSamples: 1024
+            fftSamples: 256
         }),
         Timeline.create({
             container: '#wave-timeline'
@@ -81,7 +81,7 @@ async function loadFile(file) {
     const pyUrl = `/data/${base}_pyannote.json`;
     const silUrl = `/data/${base}_silero.json`;
 
-    draw(); // clear curves while loading new file
+    clear(); // clear curves while loading new file
     Promise.all([
         fetch(pyUrl).then(r => r.json()),
         fetch(silUrl).then(r => r.json())
@@ -133,6 +133,9 @@ function drawCurve(t, p, color) {
 // -------------------------
 // MAIN DRAW
 // -------------------------
+function clear() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!data.py || !data.sil) return;
