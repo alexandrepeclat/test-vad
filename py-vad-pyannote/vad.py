@@ -1,9 +1,9 @@
 # =========================================================
-# SILERO VAD → CONTINUOUS SIGNAL EXPORT (JSON)
+# PYANNOTE VAD → CONTINUOUS SIGNAL EXPORT (JSON)
 #
 # Usage:
-#   python heatmapJson.py path/to/audio.wav
-#   python heatmapJson.py path/to/audio.mp3 --plot
+#   python heatmap.py path/to/audio.mp3
+#   python heatmap.py path/to/audio.wav --plot
 # =========================================================
 
 import os
@@ -18,47 +18,23 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_SHOW_CPP_STACKTRACES"] = "0"
 os.environ["LIGHTNING_LOG_LEVEL"] = "ERROR"
 
+from py_common.audio import load_audio
 import argparse
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
 import subprocess
 import json
 from pathlib import Path
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
-
-# =========================================================
-# AUDIO LOADING (FFMPEG → mono float32)
-# =========================================================
-def load_audio(path, sr=16000):
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(path),
-        "-ac", "1",
-        "-ar", str(sr),
-        "-f", "f32le",
-        "-"
-    ]
-
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode())
-
-    audio = np.frombuffer(result.stdout, np.float32)
-    return audio, sr
+from pyannote.audio import Pipeline
 
 
 # =========================================================
-# SILERO MODEL
+# ENV (important for stability on Windows)
 # =========================================================
-model, utils = torch.hub.load(
-    repo_or_dir="snakers4/silero-vad",
-    model="silero_vad",
-    trust_repo=True
-)
-
-(get_speech_timestamps, _, _, _, _) = utils
+os.environ["PYANNOTE_NO_TORCHCODEC"] = "1"
+os.environ["SPEECHBRAIN_K2"] = "0"
 
 
 # =========================================================
@@ -76,33 +52,54 @@ if not audio_path.exists():
 
 
 # =========================================================
-# LOAD AUDIO
+# HF TOKEN
+# =========================================================
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN not set")
+
+
+# =========================================================
+# AUDIO LOADING (FFMPEG)
 # =========================================================
 print("Loading audio...")
-wav, sr = load_audio(audio_path)
-wav = torch.tensor(wav)
+audio, sr = load_audio(audio_path)
+audio_tensor = torch.tensor(audio).unsqueeze(0)
 
 
 # =========================================================
-# VAD (SEGMENTS FROM MODEL)
+# LOAD PYANNOTE
+# =========================================================
+print("Loading pyannote VAD...")
+pipeline = Pipeline.from_pretrained(
+    "pyannote/voice-activity-detection",
+    use_auth_token=HF_TOKEN
+)
+
+
+# =========================================================
+# RUN VAD
 # =========================================================
 print("Running VAD...")
-speech = get_speech_timestamps(wav, model, sampling_rate=sr)
+result = pipeline({
+    "waveform": audio_tensor,
+    "sample_rate": sr
+})
+
+segments = result.get_timeline()
 
 
 # =========================================================
-# SIGNAL GENERATION (ARANGE GRID)
+# SIGNAL GENERATION
 # =========================================================
-duration = len(wav) / sr
-step = 0.1  # 100ms resolution (UI-friendly)
+duration = len(audio) / sr
+step = 0.1
 
 t = np.arange(0, duration, step)
 p = np.zeros_like(t)
 
-for seg in speech:
-    start = seg["start"] / sr
-    end = seg["end"] / sr
-    p[(t >= start) & (t <= end)] = 1.0
+for seg in segments:
+    p[(t >= seg.start) & (t <= seg.end)] = 1.0
 
 p = gaussian_filter1d(p, sigma=2)
 
@@ -110,7 +107,7 @@ p = gaussian_filter1d(p, sigma=2)
 # =========================================================
 # EXPORT JSON (NEXT TO INPUT FILE)
 # =========================================================
-out_file = audio_path.with_name(f"{audio_path.stem}_silero.json")
+out_file = audio_path.with_name(f"{audio_path.stem}_pyannote.json")
 
 data = {
     "audio": audio_path.name,
@@ -127,7 +124,7 @@ print(f"Saved: {out_file}")
 
 
 # =========================================================
-# PLOT (OPTIONAL DEBUG)
+# PLOT (OPTIONAL)
 # =========================================================
 if args.plot:
     t_min = t / 60
@@ -135,9 +132,9 @@ if args.plot:
     plt.figure(figsize=(12, 4))
     plt.plot(t_min, p)
 
-    plt.title("Silero VAD - Speech Activity")
+    plt.title("Pyannote VAD - Speech Activity")
     plt.xlabel("Time (minutes)")
-    plt.ylabel("Speech probability (0–1)")
+    plt.ylabel("Speech activity (0–1)")
     plt.ylim(0, 1.05)
 
     plt.show()

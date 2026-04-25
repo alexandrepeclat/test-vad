@@ -1,19 +1,27 @@
 # Structure
+```
 project/
-  data/
-    audio.mp3
-    audio_pyannote.npz
-    audio_silero.npz
-
-  vad-pyannote/
-    pyannote_heatmap.py
-
-  vad-silero/
-    silero_heatmap.py
-
-  ui/
-    app.py
-	
+│
+├── py-common/
+│   ├── py_common/
+│   │   ├── __init__.py
+│   │   └── audio.py
+│   └── pyproject.toml
+│
+├── py-vad-silero/
+│   ├── vad.py
+│   └── .venv/
+│
+├── py-vad-pyannote/
+│   ├── vad.py
+│   └── .venv/
+│
+├── py-tools/
+│   ├── spectrogram.py
+│   └── .venv/
+│
+└── data/
+```
 	
 # Usage
 Depuis dossier de base

@@ -3,10 +3,10 @@
 Write-Host "Running VAD scripts on all audio files..."
 
 $DATA_DIR = ".\data"
-$PYANNOTE_PY = ".\vad-pyannote\.venv\Scripts\python.exe"
-$SILERO_PY   = ".\vad-silero\.venv\Scripts\python.exe"
-$PYANNOTE_SCRIPT = ".\vad-pyannote\heatmapJson.py"
-$SILERO_SCRIPT   = ".\vad-silero\heatmapJson.py"
+$PYANNOTE_PY = ".\py-vad-pyannote\.venv\Scripts\python.exe"
+$SILERO_PY   = ".\py-vad-silero\.venv\Scripts\python.exe"
+$PYANNOTE_SCRIPT = ".\py-vad-pyannote\vad.py"
+$SILERO_SCRIPT   = ".\py-vad-silero\vad.py"
 
 # Get all audio files recursively
 $files_wav = Get-ChildItem $DATA_DIR -Recurse -Filter *.wav

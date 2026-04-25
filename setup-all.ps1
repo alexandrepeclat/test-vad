@@ -1,4 +1,4 @@
 
-& ".\ui\setup.ps1"
-& ".\vad-silero\setup.ps1"
-& ".\vad-pyannote\setup.ps1"
+& ".\py-vad-silero\setup.ps1"
+& ".\py-vad-pyannote\setup.ps1"
+& ".\py-tools\setup.ps1"
