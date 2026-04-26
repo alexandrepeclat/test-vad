@@ -6,8 +6,11 @@ const wavesurfer = WaveSurfer.create({
     waveColor: '#999',
     progressColor: '#333',
     height: 120,
-    // minPxPerSec: 10,
+    fillParent: true,     // 👈 remplit toute la largeur
+    minPxPerSec: 0,       // 👈 désactive le scaling basé sur durée
+    interact: true,
     partialRender: true,
+    backend: 'WebAudio',
 
     plugins: [
         Timeline.create({
@@ -22,6 +25,9 @@ let data = {
 };
 
 const timeDisplay = document.getElementById('timeDisplay');
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const stopBtn = document.getElementById('stopBtn');
 
 function formatTime(sec) {
     const m = Math.floor(sec / 60);
@@ -43,6 +49,25 @@ wavesurfer.on('timeupdate', () => {
     const duration = wavesurfer.getDuration();
     timeDisplay.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
 });
+
+wavesurfer.on('interaction', () => {
+    if (!wavesurfer.isPlaying()) {
+        wavesurfer.play();
+    }
+});
+
+playBtn.onclick = () => {
+    wavesurfer.play();
+};
+
+pauseBtn.onclick = () => {
+    wavesurfer.pause();
+};
+
+stopBtn.onclick = () => {
+    wavesurfer.pause();
+    wavesurfer.setTime(0);
+};
 
 
 
@@ -74,24 +99,33 @@ async function loadFile(file) {
     const pyUrl = `/data/${base}_pyannote.json`;
     const silUrl = `/data/${base}_silero.json`;
     const spectroUrl = `/data/${base}_spectrogram.png`;
+    const peaksUrl = `/data/${base}_peaks.json`;
 
-    clear(); // clear curves while loading new file
+    clear();
 
-    Promise.all([
-        fetch(pyUrl).then(r => r.json()),
-        fetch(silUrl).then(r => r.json())
-    ]).then(([py, sil]) => {
+    // 1. VAD (pyannote + silero)
+    const vadPromise = (async () => {
+        const [py, sil] = await Promise.all([
+            fetch(pyUrl).then(r => r.json()),
+            fetch(silUrl).then(r => r.json())
+        ]);
         data.py = py;
         data.sil = sil;
-        draw();
-    });
+        draw(); // render dès que dispo
+    })();
 
-    // -------------------------
-    // SPECTROGRAM IMAGE LOAD
-    // -------------------------
+    // 2. SPECTROGRAM
     spectroImg.src = spectroUrl;
 
-    wavesurfer.load(audio);
+    // 3. WAVEFORM (peaks + audio)
+    const wavePromise = (async () => {
+        const peaksData = await fetch(peaksUrl).then(r => r.json());
+        data.peaks = peaksData.peaks;
+        wavesurfer.load(audio, peaksData.peaks);
+    })();
+
+    vadPromise.catch(console.error);
+    wavePromise.catch(console.error);
 }
 
 // -------------------------
