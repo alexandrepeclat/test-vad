@@ -5,8 +5,8 @@ param(
 
 . .\secrets.ps1
 
-$TOOLS_PY = ".\py-tools\.venv\Scripts\python.exe"
-$PEAKS_SCRIPT = ".\py-tools\peaks.py"
+$PYTHON = ".\py-vad-pyannote\.venv\Scripts\python.exe"
+$SCRIPT = ".\py-vad-pyannote\vad.py"
 $inputAbs = $InputPath
 $outputAbs = $OutputPath
 
@@ -15,6 +15,6 @@ if (!(Test-Path $inputAbs)) {
     exit 1
 }
 
-Write-Host "Peaks -> $inputAbs -> $outputAbs"
-& $TOOLS_PY $PEAKS_SCRIPT "$inputAbs" "$outputAbs"
+Write-Host "Pyannote -> $inputAbs -> $outputAbs"
+& $PYTHON $SCRIPT "$inputAbs" "$outputAbs"
 exit $LASTEXITCODE

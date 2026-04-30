@@ -2,10 +2,7 @@
 & "./run-sd-copy.ps1"
 & "./run-wavtomp3.ps1"
 
-& "./run-meta-json.ps1"
-& "./run-vad-json.ps1"
-& "./run-build-spectrogram.ps1"
-& "./run-build-peaks.ps1"
+Write-Host "Build scripts now require -InputPath and -OutputPath and are orchestrated by ui-server / UI buttons." -ForegroundColor Yellow
 
 & "./run-ui.ps1"
 

@@ -1,15 +1,12 @@
 from py_common.audio import load_audio
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 import argparse
 
 # =========================================================
 # SPECTROGRAM GENERATION
 # =========================================================
-def generate_spectrogram(audio_path):
-
-    audio_path = Path(audio_path)
+def generate_spectrogram(audio_path, output_path):
 
     # =====================================================
     # LOAD AUDIO
@@ -50,12 +47,10 @@ def generate_spectrogram(audio_path):
     # =====================================================
     # OUTPUT FILE
     # =====================================================
-    out_file = audio_path.with_name(f"{audio_path.stem}_spectrogram.png")
-
-    plt.savefig(out_file, bbox_inches='tight', pad_inches=0)
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
     plt.close()
 
-    print(f"Saved: {out_file}")
+    print(f"Saved: {output_path}")
 
 
 # =========================================================
@@ -65,7 +60,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("audio_path", help="Path to audio file (wav/mp3)")
+    parser.add_argument("output_path", help="Path to output spectrogram PNG")
 
     args = parser.parse_args()
 
-    generate_spectrogram(args.audio_path)
+    generate_spectrogram(args.audio_path, args.output_path)

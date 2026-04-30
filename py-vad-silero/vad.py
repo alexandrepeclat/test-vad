@@ -45,10 +45,12 @@ model, utils = torch.hub.load(
 # =========================================================
 parser = argparse.ArgumentParser()
 parser.add_argument("audio_path", help="Path to audio file (wav/mp3)")
+parser.add_argument("output_path", help="Output JSON path")
 parser.add_argument("--plot", action="store_true", help="Show debug plot")
 args = parser.parse_args()
 
 audio_path = Path(args.audio_path)
+out_file = Path(args.output_path)
 
 if not audio_path.exists():
     raise FileNotFoundError(f"Audio not found: {audio_path}")
@@ -89,8 +91,6 @@ p = gaussian_filter1d(p, sigma=2)
 # =========================================================
 # EXPORT JSON (NEXT TO INPUT FILE)
 # =========================================================
-out_file = audio_path.with_name(f"{audio_path.stem}_silero.json")
-
 data = {
     "audio": audio_path.name,
     "sample_rate": sr,

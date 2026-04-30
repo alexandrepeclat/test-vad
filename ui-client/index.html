@@ -7,64 +7,366 @@
 
     <style>
         body {
-            font-family: sans-serif;
+            font-family: "Segoe UI", Tahoma, sans-serif;
             margin: 20px;
+            color: #1d1d1d;
+            background: #f5f7fb;
         }
 
         #container {
             display: flex;
             gap: 20px;
+            align-items: flex-start;
         }
 
-        #fileList {
-            width: 200px;
+        #controls {
+            width: 320px;
+            background: #ffffff;
+            border: 1px solid #d5d9e2;
+            border-radius: 10px;
+            padding: 12px;
+            position: sticky;
+            top: 12px;
+            max-height: calc(100vh - 40px);
+            overflow: auto;
+        }
+
+        #dayList {
+            list-style: none;
+            max-height: 360px;
+            overflow: auto;
+            border: 1px solid #e2e6ef;
+            border-radius: 8px;
             padding-left: 12px;
+            margin: 0;
         }
 
-        #fileList li {
-            cursor: pointer;
-            padding: 2px;
+        #dayList li {
+            padding: 6px 4px;
+            border-bottom: 1px solid #eef1f6;
         }
 
-        #fileList li:hover {
-            background: #eee;
+        #dayList li:last-child {
+            border-bottom: none;
         }
 
-        #graphs, #graphs > * {
+        #graphs {
+            min-width: 0;
             width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .file-card {
+            background: #fff;
+            border: 1px solid #d5d9e2;
+            border-radius: 10px;
+            padding: 12px;
+            box-shadow: 0 2px 8px rgba(15, 31, 61, 0.06);
+        }
+
+        .day-card {
+            background: #ffffff;
+            border: 1px solid #cdd4e2;
+            border-radius: 10px;
+            padding: 10px;
+            box-shadow: 0 2px 8px rgba(15, 31, 61, 0.05);
+        }
+
+        .day-title {
+            font-size: 15px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .day-subtitle {
+            font-size: 12px;
+            color: #5a6478;
+            margin: 0 0 0 8px;
+        }
+
+        .day-head {
+            display: flex;
+            align-items: baseline;
+            margin-bottom: 8px;
+        }
+
+        .day-timeline-header {
+            position: relative;
+            height: 20px;
+            border: 1px solid #dfe4ef;
+            border-radius: 0;
+            background: linear-gradient(180deg, #f7f9fd 0%, #f2f5fb 100%);
+            overflow: hidden;
+            margin-bottom: 0;
+        }
+
+        .day-scroll {
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-bottom: 0;
+        }
+
+        .day-track {
+            width: 1400px;
+        }
+
+        .timeline-tick {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: #c8d1e1;
+        }
+
+        .timeline-label {
+            position: absolute;
+            top: 1px;
+            transform: translateX(-50%);
+            font-size: 11px;
+            color: #4f596f;
+            white-space: nowrap;
+        }
+
+        .lane {
+            position: relative;
+            border: 1px dashed #d8deea;
+            border-radius: 0;
+            min-height: 176px;
+            background: #fcfdff;
+            margin: 0 0 8px;
+            overflow: hidden;
+            padding-bottom: 0;
+        }
+
+        .lane:last-child {
+            margin-bottom: 0;
+        }
+
+        .segment {
+            position: absolute;
+            top: 4px;
+            width: 320px;
+            background: #fff;
+            border: 1px solid #d5d9e2;
+            border-radius: 0;
+            padding: 0;
+            box-shadow: 0 1px 5px rgba(14, 30, 62, 0.06);
+        }
+
+        .file-head {
+            margin: 0;
+            padding: 5px 8px;
+            border-bottom: 1px solid #edf1f7;
+        }
+
+        .file-title {
+            font-family: Consolas, monospace;
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-times {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 3px;
+        }
+
+        .file-time-center {
+            opacity: 0;
+            transition: opacity 120ms ease;
+        }
+
+        .file-time-center.visible {
+            opacity: 1;
         }
 
         .controls {
-            margin-top: 10px;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 0;
+            padding: 5px 8px;
+        }
+
+        .player-btn {
+            font-size: 12px;
+            padding: 2px 6px;
+            min-width: 26px;
+        }
+
+        .small {
+            font-size: 12px;
+            color: #546075;
+        }
+
+        .wave-wrap {
+            position: relative;
+            height: 96px;
+            border: 0;
+            border-radius: 0;
+            overflow: hidden;
+            background: transparent;
+        }
+
+        .spectro-layer {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
+            opacity: 0.95;
+            pointer-events: none;
+        }
+
+        .waveform {
+            position: absolute;
+            inset: 0;
+            opacity: 0.4;
+        }
+
+        .vadgraph {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background: transparent;
+            z-index: 3;
+        }
+
+        .timeline {
+            margin-top: 6px;
+            border-bottom: 1px solid #e5e8f0;
+            min-height: 22px;
+        }
+
+        .status {
+            font-size: 12px;
+            margin: 4px 0 0;
+            color: #5a6478;
+            padding: 0 8px 8px;
+        }
+
+        .error {
+            color: #a01f30;
+        }
+
+        .section-title {
+            margin: 12px 0 8px;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #5a6478;
+        }
+
+        button {
+            border: 1px solid #cad1de;
+            border-radius: 6px;
+            background: #f7f9fc;
+            padding: 5px 8px;
+            cursor: pointer;
+        }
+
+        .script-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-bottom: 8px;
+        }
+
+        .script-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .zoom-controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 6px 0;
+        }
+
+        #zoomInfo {
+            font-size: 12px;
+            color: #546075;
+            min-width: 64px;
+        }
+
+        #scriptOutput {
+            white-space: pre-wrap;
+            font-family: Consolas, monospace;
+            font-size: 12px;
+            background: #f8f9fc;
+            border: 1px solid #e2e6ef;
+            border-radius: 8px;
+            padding: 8px;
+            max-height: 160px;
+            overflow: auto;
+        }
+
+        @media (max-width: 1100px) {
+            #container {
+                flex-direction: column;
+            }
+
+            #controls {
+                width: 100%;
+                position: static;
+                max-height: none;
+            }
         }
     </style>
 </head>
 
 <body>
-    <h2>VAD Viewer</h2>
     <div id="container">
         <div id="controls">
-            <ul id="fileList"></ul>
-            <div>
+            <div class="section-title">Jours (startDate)</div>
+            <div class="controls">
+                <button id="selectAllDaysBtn">Tout sélectionner</button>
+                <button id="clearDaysBtn">Effacer sélection</button>
+                <button id="loadDaysBtn">Charger les jours</button>
+            </div>
+            <ul id="dayList"></ul>
+
+            <div class="section-title">Overlays VAD</div>
+            <div class="controls">
                 <label><input type="checkbox" id="pyToggle" checked> Pyannote</label>
                 <label><input type="checkbox" id="silToggle" checked> Silero</label>
+                <label><input type="checkbox" id="waveToggle" checked> Waveform</label>
+                <label><input type="checkbox" id="spectroToggle" checked> Spectrogram</label>
                 <button id="invertBtn">Invert</button>
             </div>
-            <div class="controls">
-                <button id="playBtn">Play</button>
-                <button id="pauseBtn">Pause</button>
-                <button id="stopBtn">Stop</button>
+            <div class="zoom-controls">
+                <button id="zoomOutBtn">-</button>
+                <button id="zoomInBtn">+</button>
+                <button id="zoomResetBtn">Reset</button>
+                <span id="zoomInfo">100%</span>
             </div>
-            <div id="timeDisplay" style="margin-top:10px; font-family: monospace;">
-                -
+
+            <div class="section-title">Scripts backend</div>
+            <div class="script-list">
+                <label><input type="checkbox" class="script-check" value="run-meta-json.ps1" checked> metadata json</label>
+                <label><input type="checkbox" class="script-check" value="run-vad-pyannote.ps1" checked> vad pyannote</label>
+                <label><input type="checkbox" class="script-check" value="run-vad-silero.ps1" checked> vad silero</label>
+                <label><input type="checkbox" class="script-check" value="run-build-spectrogram.ps1" checked> build spectrogram</label>
+                <label><input type="checkbox" class="script-check" value="run-build-peaks.ps1" checked> build peaks</label>
             </div>
+            <div class="script-actions">
+                <label><input type="checkbox" id="forceScriptToggle"> force</label>
+                <button id="runScriptsBtn">Lancer scripts sélectionnés</button>
+                <button id="refreshAssetsBtn">Refresh assets</button>
+            </div>
+            <div id="scriptOutput">Aucun script lancé.</div>
         </div>
-        <div id="graphs">
-            <div id="waveform"></div>
-            <canvas id="vadgraph"></canvas>
-            <div id="spectrogram"></div>
-            <div id="wave-timeline"></div>
-        </div>
+        <div id="graphs"></div>
     </div>
     <script type="module" src="client.js"></script>
 </body>
