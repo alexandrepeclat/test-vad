@@ -2,7 +2,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,8 +11,20 @@ const ROOT = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT, 'data');
 const CLIENT_DIR = path.join(ROOT, 'ui-client');
 const scriptLogClients = new Map();
+const scriptStateClients = new Set();
+const scriptRunStates = new Map();
+const SCRIPT_LOG_BACKLOG_LIMIT = 1500;
+const SCRIPT_RUN_STATE_LIMIT = 12;
+let activeScriptRunId = null;
+let activeScriptChild = null;
+let activeScriptChildAbortReason = null;
+const activeRunControl = {
+    stopRequested: false,
+    skipRequested: false
+};
 
 const SCRIPT_ALLOWLIST = new Set([
+    'run-wavtomp3.ps1',
     'run-meta-json.ps1',
     'run-vad-pyannote.ps1',
     'run-vad-silero.ps1',
@@ -39,6 +51,60 @@ function sendJson(res, statusCode, payload) {
     res.end(JSON.stringify(payload));
 }
 
+function terminateChildProcessTree(child, abortReason) {
+    if (!child || typeof child.pid !== 'number') return;
+    activeScriptChildAbortReason = abortReason;
+    const pid = child.pid;
+
+    try {
+        // On Windows, kill the whole process tree and wait for completion.
+        const killResult = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+            windowsHide: true,
+            encoding: 'utf-8'
+        });
+        if (killResult.status !== 0) {
+            console.warn(`[script:control] taskkill failed for pid=${pid}:`, killResult.stderr || killResult.stdout || killResult.error || 'unknown');
+        }
+    } catch {
+        // Ignore taskkill launch failure and fallback below.
+    }
+
+    try {
+        const stopResult = spawnSync('powershell.exe', [
+            '-NoProfile',
+            '-Command',
+            `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`
+        ], {
+            windowsHide: true,
+            encoding: 'utf-8'
+        });
+        if (stopResult.status !== 0) {
+            console.warn(`[script:control] Stop-Process failed for pid=${pid}:`, stopResult.stderr || stopResult.stdout || stopResult.error || 'unknown');
+        }
+    } catch {
+        // Ignore fallback failures.
+    }
+
+    try {
+        child.kill('SIGKILL');
+    } catch {
+        // Ignore if already terminated.
+    }
+
+    setTimeout(() => {
+        if (!child.killed) {
+            try {
+                spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+                    windowsHide: true,
+                    encoding: 'utf-8'
+                });
+            } catch {
+                // Ignore retry failures.
+            }
+        }
+    }, 300);
+}
+
 function sanitizeRunId(value) {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
@@ -49,6 +115,77 @@ function sanitizeRunId(value) {
 function sseWrite(res, eventName, payload) {
     res.write(`event: ${eventName}\n`);
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function createRunId() {
+    return `run-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function ensureScriptRunState(runId) {
+    if (!scriptRunStates.has(runId)) {
+        scriptRunStates.set(runId, {
+            runId,
+            status: 'idle',
+            startedAt: null,
+            endedAt: null,
+            scripts: [],
+            targets: [],
+            force: false,
+            continueOnError: true,
+            currentTask: null,
+            pendingTasks: [],
+            currentEntry: null,
+            pendingEntries: [],
+            summary: null,
+            events: []
+        });
+    }
+    return scriptRunStates.get(runId);
+}
+
+function pruneScriptRunStates() {
+    if (scriptRunStates.size <= SCRIPT_RUN_STATE_LIMIT) return;
+    const removable = Array.from(scriptRunStates.values())
+        .filter((state) => state.status !== 'running' && state.runId !== activeScriptRunId)
+        .sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+
+    while (scriptRunStates.size > SCRIPT_RUN_STATE_LIMIT && removable.length > 0) {
+        const oldest = removable.shift();
+        scriptRunStates.delete(oldest.runId);
+    }
+}
+
+function appendScriptRunEvent(runId, payload) {
+    if (!runId) return;
+    const state = ensureScriptRunState(runId);
+    state.events.push({
+        at: Date.now(),
+        payload
+    });
+    if (state.events.length > SCRIPT_LOG_BACKLOG_LIMIT) {
+        state.events.splice(0, state.events.length - SCRIPT_LOG_BACKLOG_LIMIT);
+    }
+}
+
+function getRunSnapshot(runId) {
+    const state = scriptRunStates.get(runId);
+    if (!state) return null;
+    return {
+        runId: state.runId,
+        status: state.status,
+        startedAt: state.startedAt,
+        endedAt: state.endedAt,
+        scripts: state.scripts,
+        targets: state.targets,
+        force: state.force,
+        continueOnError: state.continueOnError,
+        currentTask: state.currentTask,
+        pendingTasks: state.pendingTasks,
+        currentEntry: state.currentEntry,
+        pendingEntries: state.pendingEntries,
+        summary: state.summary,
+        events: state.events
+    };
 }
 
 function addScriptLogClient(runId, res) {
@@ -67,11 +204,84 @@ function removeScriptLogClient(runId, res) {
     }
 }
 
+function addScriptStateClient(res) {
+    scriptStateClients.add(res);
+}
+
+function removeScriptStateClient(res) {
+    scriptStateClients.delete(res);
+}
+
+function broadcastScriptState(payload) {
+    if (!payload || scriptStateClients.size === 0) return;
+    scriptStateClients.forEach((res) => sseWrite(res, 'state', payload));
+}
+
+function broadcastScriptStateSnapshot(reason = 'update') {
+    const payload = {
+        reason,
+        ...buildScriptStateSnapshotPayload()
+    };
+    scriptStateClients.forEach((res) => sseWrite(res, 'snapshot', payload));
+}
+
+function buildScriptStateSnapshotPayload() {
+    if (!activeScriptRunId) {
+        return {
+            hasActiveRun: false,
+            activeRunId: null,
+            run: null
+        };
+    }
+
+    const snapshot = getRunSnapshot(activeScriptRunId);
+    return {
+        hasActiveRun: true,
+        activeRunId: activeScriptRunId,
+        run: snapshot
+            ? {
+                runId: snapshot.runId,
+                status: snapshot.status,
+                startedAt: snapshot.startedAt,
+                endedAt: snapshot.endedAt,
+                scripts: snapshot.scripts,
+                targets: snapshot.targets,
+                force: snapshot.force,
+                continueOnError: snapshot.continueOnError,
+                currentTask: snapshot.currentTask,
+                pendingTasks: snapshot.pendingTasks,
+                currentEntry: snapshot.currentEntry,
+                pendingEntries: snapshot.pendingEntries,
+                summary: snapshot.summary
+            }
+            : null
+    };
+}
+
 function broadcastScriptLog(runId, payload) {
     if (!runId) return;
+    const enrichedPayload = payload && typeof payload === 'object' && payload.runId == null
+        ? { ...payload, runId }
+        : payload;
+
+    appendScriptRunEvent(runId, enrichedPayload);
+
+    if (enrichedPayload?.type && enrichedPayload.type !== 'chunk') {
+        broadcastScriptState(enrichedPayload);
+        if (
+            enrichedPayload.type === 'run-start'
+            || enrichedPayload.type === 'task-start'
+            || enrichedPayload.type === 'task-end'
+            || enrichedPayload.type === 'run-end'
+            || enrichedPayload.type === 'control'
+        ) {
+            broadcastScriptStateSnapshot(enrichedPayload.type);
+        }
+    }
+
     const set = scriptLogClients.get(runId);
     if (!set || set.size === 0) return;
-    set.forEach((res) => sseWrite(res, 'log', payload));
+    set.forEach((res) => sseWrite(res, 'log', enrichedPayload));
 }
 
 function closeScriptLogStream(runId, payload = {}) {
@@ -153,7 +363,7 @@ function getSelectableAudioFiles() {
         const stem = rel.slice(0, -ext.length);
         const current = byStem.get(stem);
 
-        if (!current || (ext === '.mp3' && current.ext !== '.mp3')) {
+        if (!current || (ext === '.wav' && current.ext !== '.wav')) {
             byStem.set(stem, { rel, ext });
         }
     }
@@ -215,11 +425,20 @@ function extractMetadataFields(meta) {
 }
 
 function buildFileDetails(audioRelPath) {
-    const processingRel = findPreferredAudioCandidate(audioRelPath, 'wav');
-    const clientRel = findPreferredAudioCandidate(audioRelPath, 'mp3');
+    const normalized = toPosix(audioRelPath || '').replace(/^\/+/, '');
+    const ext = path.extname(normalized).toLowerCase();
+    const stem = ext ? normalized.slice(0, -ext.length) : normalized;
+    const wavRel = `${stem}.wav`;
+    const mp3Rel = `${stem}.mp3`;
+    const wavAbs = safeResolve(DATA_DIR, wavRel);
+    const mp3Abs = safeResolve(DATA_DIR, mp3Rel);
+    const hasWav = !!(wavAbs && fs.existsSync(wavAbs));
+    const hasMp3 = !!(mp3Abs && fs.existsSync(mp3Abs));
+    const processingRel = hasWav ? wavRel : (hasMp3 ? mp3Rel : findPreferredAudioCandidate(audioRelPath, 'wav'));
+    const clientRel = hasMp3 ? mp3Rel : (hasWav ? wavRel : findPreferredAudioCandidate(audioRelPath, 'mp3'));
     const processingAbs = safeResolve(DATA_DIR, processingRel);
     const clientAbs = safeResolve(DATA_DIR, clientRel);
-    const baseRel = processingRel.replace(/\.(mp3|wav)$/i, '');
+    const baseRel = (hasWav ? wavRel : processingRel).replace(/\.(mp3|wav)$/i, '');
 
     const candidates = {
         metadata: `${baseRel}_metadata.json`,
@@ -232,6 +451,8 @@ function buildFileDetails(audioRelPath) {
     const exists = {
         audio: !!(clientAbs && fs.existsSync(clientAbs)),
         processingAudio: !!(processingAbs && fs.existsSync(processingAbs)),
+        wav: hasWav,
+        mp3: hasMp3,
         metadata: false,
         pyannote: false,
         silero: false,
@@ -273,9 +494,14 @@ function buildFileDetails(audioRelPath) {
         requestedFile: audioRelPath,
         audioFile: clientRel,
         processingFile: processingRel,
+        wavFile: wavRel,
+        mp3File: mp3Rel,
+        displayFile: processingRel || clientRel,
         baseName: path.basename(baseRel),
         audioPath: `/data/${toPosix(clientRel)}`,
         processingAudioPath: `/data/${toPosix(processingRel)}`,
+        wavPath: `/data/${toPosix(wavRel)}`,
+        mp3Path: `/data/${toPosix(mp3Rel)}`,
         metadataPath: `/data/${toPosix(candidates.metadata)}`,
         pyannotePath: `/data/${toPosix(candidates.pyannote)}`,
         sileroPath: `/data/${toPosix(candidates.silero)}`,
@@ -288,6 +514,15 @@ function buildFileDetails(audioRelPath) {
         endMs,
         day
     };
+}
+
+function getScriptFileInventory() {
+    return getSelectableAudioFiles()
+        .map((relPath) => buildFileDetails(relPath))
+        .sort((a, b) => (a.displayFile || a.processingFile || a.audioFile || '').localeCompare(
+            b.displayFile || b.processingFile || b.audioFile || '',
+            'en'
+        ));
 }
 
 function getMetadataRecords() {
@@ -378,12 +613,142 @@ function buildDayDetails(days) {
 
 function buildOutputForScript(scriptName, targetRelPath) {
     const stem = targetRelPath.replace(/\.(mp3|wav)$/i, '');
+    if (scriptName === 'run-wavtomp3.ps1') return `${stem}.mp3`;
     if (scriptName === 'run-meta-json.ps1') return `${stem}_metadata.json`;
     if (scriptName === 'run-vad-pyannote.ps1') return `${stem}_pyannote.json`;
     if (scriptName === 'run-vad-silero.ps1') return `${stem}_silero.json`;
     if (scriptName === 'run-build-spectrogram.ps1') return `${stem}_spectrogram.png`;
     if (scriptName === 'run-build-peaks.ps1') return `${stem}_peaks.json`;
     return null;
+}
+
+function getTagKeyForScript(scriptName) {
+    if (scriptName === 'run-wavtomp3.ps1') return 'mp3';
+    if (scriptName === 'run-meta-json.ps1') return 'metadata';
+    if (scriptName === 'run-vad-pyannote.ps1') return 'pyannote';
+    if (scriptName === 'run-vad-silero.ps1') return 'silero';
+    if (scriptName === 'run-build-spectrogram.ps1') return 'spectrogram';
+    if (scriptName === 'run-build-peaks.ps1') return 'peaks';
+    return null;
+}
+
+function getFileKeyFromTarget(targetRelPath) {
+    if (typeof targetRelPath !== 'string') return null;
+    const trimmed = targetRelPath.trim();
+    if (!trimmed) return null;
+    return trimmed.replace(/\.(mp3|wav)$/i, '');
+}
+
+function normalizeTaskForQueue(task, defaultForce = false) {
+    const script = typeof task?.script === 'string' ? task.script : null;
+    const target = sanitizeTarget(task?.target);
+    if (!script || !target || !SCRIPT_ALLOWLIST.has(script)) {
+        return null;
+    }
+
+    const force = typeof task?.force === 'boolean' ? task.force : !!defaultForce;
+    const fileKeyRaw = typeof task?.fileKey === 'string' ? task.fileKey.trim() : '';
+    const tagKeyRaw = typeof task?.tagKey === 'string' ? task.tagKey.trim() : '';
+    const fileKey = fileKeyRaw || getFileKeyFromTarget(target);
+    const tagKey = tagKeyRaw || getTagKeyForScript(script);
+
+    return {
+        script,
+        target,
+        force,
+        fileKey,
+        tagKey
+    };
+}
+
+function taskToEntry(task) {
+    return {
+        fileKey: task?.fileKey || getFileKeyFromTarget(task?.target),
+        tagKey: task?.tagKey || getTagKeyForScript(task?.script)
+    };
+}
+
+function buildRequestedTasks(parsed) {
+    const requestedTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    if (requestedTasks.length > 0) {
+        const normalizedTasks = [];
+
+        for (const task of requestedTasks) {
+            const normalizedTask = normalizeTaskForQueue(task, false);
+            if (!normalizedTask) {
+                return {
+                    ok: false,
+                    error: 'Some tasks are invalid',
+                    allowed: Array.from(SCRIPT_ALLOWLIST)
+                };
+            }
+
+            normalizedTasks.push(normalizedTask);
+        }
+
+        return {
+            ok: true,
+            tasks: normalizedTasks,
+            scripts: Array.from(new Set(normalizedTasks.map((task) => task.script))),
+            targets: Array.from(new Set(normalizedTasks.map((task) => task.target)))
+        };
+    }
+
+    const scripts = Array.isArray(parsed.scripts)
+        ? parsed.scripts
+        : typeof parsed.script === 'string'
+            ? [parsed.script]
+            : [];
+
+    if (scripts.length === 0) {
+        return {
+            ok: false,
+            error: 'No scripts requested'
+        };
+    }
+
+    const invalidScripts = scripts.filter((script) => !SCRIPT_ALLOWLIST.has(script));
+    if (invalidScripts.length > 0) {
+        return {
+            ok: false,
+            error: 'Some scripts are not allowed',
+            invalid: invalidScripts,
+            allowed: Array.from(SCRIPT_ALLOWLIST)
+        };
+    }
+
+    const requestedTargets = Array.isArray(parsed.targets)
+        ? parsed.targets
+        : typeof parsed.target === 'string'
+            ? [parsed.target]
+            : [];
+
+    const targets = requestedTargets
+        .map((target) => sanitizeTarget(target))
+        .filter(Boolean);
+
+    if (requestedTargets.length > 0 && targets.length === 0) {
+        return {
+            ok: false,
+            error: 'No valid targets found'
+        };
+    }
+
+    const executionTargets = targets.length > 0 ? targets : [null];
+    const tasks = [];
+
+    for (const script of scripts) {
+        for (const target of executionTargets) {
+            tasks.push({ script, target });
+        }
+    }
+
+    return {
+        ok: true,
+        tasks,
+        scripts,
+        targets
+    };
 }
 
 function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPath, displayOutputPath = outputPath, onChunk = null) {
@@ -401,8 +766,20 @@ function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPa
             outputPath
         ];
 
+        const commandLine = ['powershell.exe', ...args.map((arg) => {
+            if (/\s/.test(arg)) {
+                return `"${arg.replace(/"/g, '\\"')}"`;
+            }
+            return arg;
+        })].join(' ');
+
+        console.log(`[script:start] ${scriptName} | ${displayInputPath} -> ${displayOutputPath}`);
+        console.log(`[script:cmd] ${commandLine}`);
+
         const startedAt = Date.now();
         const child = spawn('powershell.exe', args, { cwd: ROOT });
+        activeScriptChild = child;
+        activeScriptChildAbortReason = null;
 
         let stdout = '';
         let stderr = '';
@@ -410,6 +787,7 @@ function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPa
         child.stdout.on('data', (chunk) => {
             const text = chunk.toString();
             stdout += text;
+            process.stdout.write(`[script:stdout:${scriptName}] ${text}`);
             if (onChunk) {
                 onChunk({
                     stream: 'stdout',
@@ -424,6 +802,7 @@ function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPa
         child.stderr.on('data', (chunk) => {
             const text = chunk.toString();
             stderr += text;
+            process.stderr.write(`[script:stderr:${scriptName}] ${text}`);
             if (onChunk) {
                 onChunk({
                     stream: 'stderr',
@@ -436,6 +815,12 @@ function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPa
         });
 
         child.on('close', (code) => {
+            if (activeScriptChild === child) {
+                activeScriptChild = null;
+            }
+            const abortedBy = activeScriptChildAbortReason;
+            activeScriptChildAbortReason = null;
+            console.log(`[script:end] ${scriptName} | code=${code} | durationMs=${Date.now() - startedAt}`);
             resolve({
                 script: scriptName,
                 inputPath: displayInputPath,
@@ -444,7 +829,8 @@ function runScript(scriptName, inputPath, outputPath, displayInputPath = inputPa
                 code,
                 durationMs: Date.now() - startedAt,
                 stdout,
-                stderr
+                stderr,
+                abortedBy
             });
         });
     });
@@ -489,6 +875,14 @@ const server = http.createServer((req, res) => {
         }
     }
 
+    if (pathname === '/api/script-files') {
+        try {
+            return sendJson(res, 200, getScriptFileInventory());
+        } catch {
+            return sendJson(res, 500, { error: 'Error loading script files' });
+        }
+    }
+
     if (pathname === '/api/days') {
         try {
             const inventory = getDayInventory();
@@ -512,9 +906,15 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === '/api/scripts/logs' && req.method === 'GET') {
-        const runId = sanitizeRunId(parsedUrl.searchParams.get('runId'));
+        const requestedRunId = sanitizeRunId(parsedUrl.searchParams.get('runId'));
+        const runId = requestedRunId || activeScriptRunId;
         if (!runId) {
             return sendJson(res, 400, { error: 'Invalid or missing runId' });
+        }
+
+        const runState = scriptRunStates.get(runId);
+        if (!runState) {
+            return sendJson(res, 404, { error: 'Run not found' });
         }
 
         res.writeHead(200, {
@@ -526,10 +926,167 @@ const server = http.createServer((req, res) => {
 
         addScriptLogClient(runId, res);
         sseWrite(res, 'ready', { runId });
+        runState.events.forEach((entry) => sseWrite(res, 'log', entry.payload));
+
+        if (runState.status !== 'running') {
+            sseWrite(res, 'end', {
+                ok: !!runState.summary && runState.summary.failed === 0,
+                summary: runState.summary || null
+            });
+            res.end();
+            removeScriptLogClient(runId, res);
+            return;
+        }
 
         req.on('close', () => {
             removeScriptLogClient(runId, res);
         });
+        return;
+    }
+
+    if (pathname === '/api/scripts/state' && req.method === 'GET') {
+        return sendJson(res, 200, buildScriptStateSnapshotPayload());
+    }
+
+    if (pathname === '/api/scripts/stream' && req.method === 'GET') {
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive'
+        });
+        res.write(': connected\n\n');
+
+        addScriptStateClient(res);
+        sseWrite(res, 'ready', { ok: true });
+        sseWrite(res, 'snapshot', {
+            reason: 'connect',
+            ...buildScriptStateSnapshotPayload()
+        });
+
+        req.on('close', () => {
+            removeScriptStateClient(res);
+        });
+        return;
+    }
+
+    if (pathname === '/api/scripts/control' && req.method === 'POST') {
+        (async () => {
+            try {
+                const body = await readBody(req);
+                const parsed = JSON.parse(body || '{}');
+                const action = typeof parsed.action === 'string' ? parsed.action.trim().toLowerCase() : '';
+
+                if (!activeScriptRunId) {
+                    return sendJson(res, 409, { error: 'No active script run' });
+                }
+
+                if (action !== 'stop' && action !== 'skip') {
+                    return sendJson(res, 400, { error: 'Invalid control action', allowed: ['stop', 'skip'] });
+                }
+
+                if (action === 'stop') {
+                    activeRunControl.stopRequested = true;
+                    activeRunControl.skipRequested = false;
+                } else {
+                    activeRunControl.skipRequested = !!activeScriptChild;
+                }
+
+                broadcastScriptLog(activeScriptRunId, {
+                    type: 'control',
+                    action,
+                    runId: activeScriptRunId
+                });
+
+                if (activeScriptChild && !activeScriptChild.killed) {
+                    terminateChildProcessTree(activeScriptChild, action);
+                }
+
+                return sendJson(res, 200, {
+                    ok: true,
+                    action,
+                    runId: activeScriptRunId
+                });
+            } catch {
+                return sendJson(res, 500, { error: 'Failed to control script run' });
+            }
+        })();
+        return;
+    }
+
+    if (pathname === '/api/scripts/queue' && req.method === 'POST') {
+        (async () => {
+            try {
+                if (!activeScriptRunId) {
+                    return sendJson(res, 409, { error: 'No active script run' });
+                }
+
+                const runState = scriptRunStates.get(activeScriptRunId);
+                if (!runState || runState.status !== 'running') {
+                    return sendJson(res, 409, { error: 'No running state found' });
+                }
+
+                const body = await readBody(req);
+                const parsed = JSON.parse(body || '{}');
+                const taskPlan = buildRequestedTasks(parsed);
+                if (!taskPlan.ok) {
+                    return sendJson(res, 400, taskPlan);
+                }
+
+                const existingKeys = new Set();
+                const currentEntry = runState.currentEntry;
+                if (currentEntry?.fileKey && currentEntry?.tagKey) {
+                    existingKeys.add(`${currentEntry.fileKey}::${currentEntry.tagKey}`);
+                }
+                (runState.pendingEntries || []).forEach((entry) => {
+                    if (entry?.fileKey && entry?.tagKey) {
+                        existingKeys.add(`${entry.fileKey}::${entry.tagKey}`);
+                    }
+                });
+
+                const appendedTasks = [];
+                taskPlan.tasks.forEach((task) => {
+                    const normalizedTask = normalizeTaskForQueue(task, runState.force === true);
+                    if (!normalizedTask) return;
+                    const key = `${normalizedTask.fileKey}::${normalizedTask.tagKey}`;
+                    if (existingKeys.has(key)) return;
+                    existingKeys.add(key);
+                    appendedTasks.push(normalizedTask);
+                });
+
+                if (appendedTasks.length === 0) {
+                    return sendJson(res, 200, {
+                        ok: true,
+                        runId: activeScriptRunId,
+                        appended: 0,
+                        deduplicated: taskPlan.tasks.length,
+                        run: getRunSnapshot(activeScriptRunId)
+                    });
+                }
+
+                runState.pendingTasks.push(...appendedTasks);
+                runState.pendingEntries = runState.pendingTasks.map((task) => taskToEntry(task));
+                runState.scripts = Array.from(new Set([
+                    ...(runState.scripts || []),
+                    ...appendedTasks.map((task) => task.script)
+                ]));
+                runState.targets = Array.from(new Set([
+                    ...(runState.targets || []),
+                    ...appendedTasks.map((task) => task.target)
+                ]));
+
+                broadcastScriptStateSnapshot('queue-updated');
+
+                return sendJson(res, 200, {
+                    ok: true,
+                    runId: activeScriptRunId,
+                    appended: appendedTasks.length,
+                    deduplicated: taskPlan.tasks.length - appendedTasks.length,
+                    run: getRunSnapshot(activeScriptRunId)
+                });
+            } catch {
+                return sendJson(res, 500, { error: 'Failed to append tasks to queue' });
+            }
+        })();
         return;
     }
 
@@ -539,44 +1096,51 @@ const server = http.createServer((req, res) => {
             try {
                 const body = await readBody(req);
                 const parsed = JSON.parse(body || '{}');
-                runId = sanitizeRunId(parsed.runId);
+                runId = sanitizeRunId(parsed.runId) || createRunId();
 
-                const scripts = Array.isArray(parsed.scripts)
-                    ? parsed.scripts
-                    : typeof parsed.script === 'string'
-                        ? [parsed.script]
-                        : [];
-                const force = parsed.force === true;
-                const continueOnError = parsed.continueOnError !== false;
-
-                if (scripts.length === 0) {
-                    return sendJson(res, 400, { error: 'No scripts requested' });
-                }
-
-                const invalidScripts = scripts.filter((s) => !SCRIPT_ALLOWLIST.has(s));
-                if (invalidScripts.length > 0) {
-                    return sendJson(res, 400, {
-                        error: 'Some scripts are not allowed',
-                        invalid: invalidScripts,
-                        allowed: Array.from(SCRIPT_ALLOWLIST)
+                if (activeScriptRunId && activeScriptRunId !== runId) {
+                    return sendJson(res, 409, {
+                        error: 'Another script run is already in progress',
+                        activeRunId: activeScriptRunId,
+                        run: getRunSnapshot(activeScriptRunId)
                     });
                 }
 
-                const requestedTargets = Array.isArray(parsed.targets)
-                    ? parsed.targets
-                    : typeof parsed.target === 'string'
-                        ? [parsed.target]
-                        : [];
+                const force = parsed.force === true;
+                const continueOnError = parsed.continueOnError !== false;
+                const taskPlan = buildRequestedTasks(parsed);
 
-                const targets = requestedTargets
-                    .map((t) => sanitizeTarget(t))
-                    .filter(Boolean);
-
-                if (requestedTargets.length > 0 && targets.length === 0) {
-                    return sendJson(res, 400, { error: 'No valid targets found' });
+                if (!taskPlan.ok) {
+                    return sendJson(res, 400, taskPlan);
                 }
 
-                const executionTargets = targets.length > 0 ? targets : [null];
+                const { tasks, scripts, targets } = taskPlan;
+                const runState = ensureScriptRunState(runId);
+                runState.status = 'running';
+                runState.startedAt = Date.now();
+                runState.endedAt = null;
+                runState.scripts = scripts;
+                runState.targets = targets;
+                runState.force = force;
+                runState.continueOnError = continueOnError;
+                runState.currentTask = null;
+                runState.pendingTasks = tasks.map((task) => ({
+                    script: task.script,
+                    target: task.target,
+                    force: task.force === true,
+                    fileKey: task.fileKey || getFileKeyFromTarget(task.target),
+                    tagKey: task.tagKey || getTagKeyForScript(task.script)
+                }));
+                runState.currentEntry = null;
+                runState.pendingEntries = runState.pendingTasks.map((task) => taskToEntry(task));
+                runState.summary = null;
+                runState.events = [];
+                activeScriptRunId = runId;
+                activeRunControl.stopRequested = false;
+                activeRunControl.skipRequested = false;
+                activeScriptChild = null;
+                activeScriptChildAbortReason = null;
+
                 const results = [];
                 let stopped = false;
 
@@ -585,165 +1149,244 @@ const server = http.createServer((req, res) => {
                     runId,
                     scripts,
                     targets,
+                    taskCount: tasks.length,
                     force,
                     continueOnError
                 });
 
-                for (const script of scripts) {
-                    for (const target of executionTargets) {
-                        if (!target) {
-                            results.push({
-                                script,
-                                inputPath: null,
-                                outputPath: null,
-                                skipped: true,
-                                reason: 'Missing target',
-                                ok: false,
-                                code: -1,
-                                durationMs: 0,
-                                stdout: '',
-                                stderr: 'Target is required for this script contract'
-                            });
-                            broadcastScriptLog(runId, {
-                                type: 'result',
-                                script,
-                                inputPath: null,
-                                outputPath: null,
-                                skipped: true,
-                                ok: false,
-                                reason: 'Missing target'
-                            });
-                            if (!continueOnError) {
-                                stopped = true;
-                                break;
-                            }
-                            continue;
-                        }
+                while (runState.pendingTasks.length > 0) {
+                    const task = runState.pendingTasks.shift();
+                    const { script, target } = task;
+                    const effectiveForce = typeof task.force === 'boolean' ? task.force : force;
+                    runState.pendingEntries = runState.pendingTasks.map((nextTask) => taskToEntry(nextTask));
+                    runState.currentEntry = taskToEntry(task);
 
-                        const outputRel = buildOutputForScript(script, target);
-                        if (!outputRel) {
-                            results.push({
-                                script,
-                                inputPath: target,
-                                outputPath: null,
-                                skipped: true,
-                                reason: 'Unknown output mapping',
-                                ok: false,
-                                code: -1,
-                                durationMs: 0,
-                                stdout: '',
-                                stderr: 'Output mapping is not defined for this script'
-                            });
-                            broadcastScriptLog(runId, {
-                                type: 'result',
-                                script,
-                                inputPath: target,
-                                outputPath: null,
-                                skipped: true,
-                                ok: false,
-                                reason: 'Unknown output mapping'
-                            });
-                            if (!continueOnError) {
-                                stopped = true;
-                                break;
-                            }
-                            continue;
-                        }
+                    if (activeRunControl.stopRequested) {
+                        stopped = true;
+                        break;
+                    }
 
-                        const outputAbs = safeResolve(DATA_DIR, outputRel);
-                        const shouldSkip = (!force && outputAbs && fs.existsSync(outputAbs));
-                        if (shouldSkip) {
-                            results.push({
-                                script,
-                                inputPath: target,
-                                outputPath: outputRel,
-                                skipped: true,
-                                reason: 'Output already exists',
-                                ok: true,
-                                code: 0,
-                                durationMs: 0,
-                                stdout: 'Skipped: output already exists',
-                                stderr: ''
-                            });
-                            broadcastScriptLog(runId, {
-                                type: 'result',
-                                script,
-                                inputPath: target,
-                                outputPath: outputRel,
-                                skipped: true,
-                                ok: true,
-                                reason: 'Output already exists'
-                            });
-                            continue;
-                        }
-
-                        const inputAbs = safeResolve(DATA_DIR, target);
-                        if (!inputAbs || !fs.existsSync(inputAbs)) {
-                            results.push({
-                                script,
-                                inputPath: target,
-                                outputPath: outputRel,
-                                skipped: true,
-                                reason: 'Input does not exist',
-                                ok: false,
-                                code: -1,
-                                durationMs: 0,
-                                stdout: '',
-                                stderr: 'Input path does not exist'
-                            });
-                            broadcastScriptLog(runId, {
-                                type: 'result',
-                                script,
-                                inputPath: target,
-                                outputPath: outputRel,
-                                skipped: true,
-                                ok: false,
-                                reason: 'Input does not exist'
-                            });
-                            if (!continueOnError) {
-                                stopped = true;
-                                break;
-                            }
-                            continue;
-                        }
-
+                    if (!target) {
+                        results.push({
+                            script,
+                            inputPath: null,
+                            outputPath: null,
+                            skipped: true,
+                            reason: 'Missing target',
+                            ok: false,
+                            code: -1,
+                            durationMs: 0,
+                            stdout: '',
+                            stderr: 'Target is required for this script contract'
+                        });
                         broadcastScriptLog(runId, {
-                            type: 'task-start',
+                            type: 'result',
+                            script,
+                            inputPath: null,
+                            outputPath: null,
+                            skipped: true,
+                            ok: false,
+                            reason: 'Missing target'
+                        });
+                        if (!continueOnError) {
+                            stopped = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    const outputRel = buildOutputForScript(script, target);
+                    if (!outputRel) {
+                        results.push({
                             script,
                             inputPath: target,
-                            outputPath: outputRel
+                            outputPath: null,
+                            skipped: true,
+                            reason: 'Unknown output mapping',
+                            ok: false,
+                            code: -1,
+                            durationMs: 0,
+                            stdout: '',
+                            stderr: 'Output mapping is not defined for this script'
                         });
-
-                        const result = await runScript(
+                        broadcastScriptLog(runId, {
+                            type: 'result',
                             script,
-                            inputAbs,
-                            outputAbs,
-                            target,
-                            outputRel,
-                            (chunkInfo) => {
-                                broadcastScriptLog(runId, {
-                                    type: 'chunk',
-                                    ...chunkInfo
-                                });
-                            }
-                        );
-                        results.push(result);
+                            inputPath: target,
+                            outputPath: null,
+                            skipped: true,
+                            ok: false,
+                            reason: 'Unknown output mapping'
+                        });
+                        if (!continueOnError) {
+                            stopped = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    const outputAbs = safeResolve(DATA_DIR, outputRel);
+                    const shouldSkip = (!effectiveForce && outputAbs && fs.existsSync(outputAbs));
+                    if (shouldSkip) {
+                        results.push({
+                            script,
+                            inputPath: target,
+                            outputPath: outputRel,
+                            skipped: true,
+                            reason: 'Output already exists',
+                            ok: true,
+                            code: 0,
+                            durationMs: 0,
+                            stdout: 'Skipped: output already exists',
+                            stderr: ''
+                        });
+                        broadcastScriptLog(runId, {
+                            type: 'result',
+                            script,
+                            inputPath: target,
+                            outputPath: outputRel,
+                            skipped: true,
+                            ok: true,
+                            reason: 'Output already exists'
+                        });
+                        continue;
+                    }
+
+                    const inputAbs = safeResolve(DATA_DIR, target);
+                    if (!inputAbs || !fs.existsSync(inputAbs)) {
+                        results.push({
+                            script,
+                            inputPath: target,
+                            outputPath: outputRel,
+                            skipped: true,
+                            reason: 'Input does not exist',
+                            ok: false,
+                            code: -1,
+                            durationMs: 0,
+                            stdout: '',
+                            stderr: 'Input path does not exist'
+                        });
+                        broadcastScriptLog(runId, {
+                            type: 'result',
+                            script,
+                            inputPath: target,
+                            outputPath: outputRel,
+                            skipped: true,
+                            ok: false,
+                            reason: 'Input does not exist'
+                        });
+                        if (!continueOnError) {
+                            stopped = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    runState.currentTask = {
+                        script,
+                        inputPath: target,
+                        outputPath: outputRel
+                    };
+                    broadcastScriptLog(runId, {
+                        type: 'task-start',
+                        script,
+                        inputPath: target,
+                        outputPath: outputRel
+                    });
+
+                    const result = await runScript(
+                        script,
+                        inputAbs,
+                        outputAbs,
+                        target,
+                        outputRel,
+                        (chunkInfo) => {
+                            broadcastScriptLog(runId, {
+                                type: 'chunk',
+                                ...chunkInfo
+                            });
+                        }
+                    );
+
+                    if (result.abortedBy === 'skip') {
+                        results.push({
+                            ...result,
+                            ok: true,
+                            skipped: true,
+                            reason: 'Skipped by user'
+                        });
+                        broadcastScriptLog(runId, {
+                            type: 'result',
+                            script,
+                            inputPath: result.inputPath,
+                            outputPath: result.outputPath,
+                            skipped: true,
+                            ok: true,
+                            reason: 'Skipped by user'
+                        });
+                        runState.currentTask = null;
+                        runState.currentEntry = null;
                         broadcastScriptLog(runId, {
                             type: 'task-end',
                             script,
                             inputPath: result.inputPath,
                             outputPath: result.outputPath,
-                            ok: result.ok,
+                            ok: true,
                             code: result.code,
                             durationMs: result.durationMs
                         });
-
-                        if (!result.ok && !continueOnError) {
-                            stopped = true;
-                            break;
-                        }
+                        activeRunControl.skipRequested = false;
+                        continue;
                     }
-                    if (stopped) break;
+
+                    if (result.abortedBy === 'stop') {
+                        results.push({
+                            ...result,
+                            ok: true,
+                            skipped: true,
+                            reason: 'Stopped by user'
+                        });
+                        broadcastScriptLog(runId, {
+                            type: 'result',
+                            script,
+                            inputPath: result.inputPath,
+                            outputPath: result.outputPath,
+                            skipped: true,
+                            ok: true,
+                            reason: 'Stopped by user'
+                        });
+                        runState.currentTask = null;
+                        runState.currentEntry = null;
+                        broadcastScriptLog(runId, {
+                            type: 'task-end',
+                            script,
+                            inputPath: result.inputPath,
+                            outputPath: result.outputPath,
+                            ok: true,
+                            code: result.code,
+                            durationMs: result.durationMs
+                        });
+                        stopped = true;
+                        break;
+                    }
+
+                    results.push(result);
+                    runState.currentTask = null;
+                    runState.currentEntry = null;
+                    broadcastScriptLog(runId, {
+                        type: 'task-end',
+                        script,
+                        inputPath: result.inputPath,
+                        outputPath: result.outputPath,
+                        ok: result.ok,
+                        code: result.code,
+                        durationMs: result.durationMs
+                    });
+
+                    if (!result.ok && !continueOnError) {
+                        stopped = true;
+                        break;
+                    }
                 }
 
                 const ok = results.every((r) => r.ok);
@@ -760,6 +1403,21 @@ const server = http.createServer((req, res) => {
                     summary
                 });
 
+                runState.status = ok ? 'done' : 'failed';
+                runState.summary = summary;
+                runState.endedAt = Date.now();
+                runState.currentTask = null;
+                runState.pendingTasks = [];
+                runState.currentEntry = null;
+                runState.pendingEntries = [];
+                activeScriptRunId = null;
+                activeScriptChild = null;
+                activeRunControl.stopRequested = false;
+                activeRunControl.skipRequested = false;
+                activeScriptChildAbortReason = null;
+                pruneScriptRunStates();
+                broadcastScriptStateSnapshot('run-finalized');
+
                 closeScriptLogStream(runId, { ok, summary });
 
                 return sendJson(res, ok ? 200 : 500, {
@@ -772,6 +1430,23 @@ const server = http.createServer((req, res) => {
                     results
                 });
             } catch {
+                const runState = runId ? ensureScriptRunState(runId) : null;
+                if (runState) {
+                    runState.status = 'failed';
+                    runState.endedAt = Date.now();
+                    runState.currentTask = null;
+                    runState.pendingTasks = [];
+                    runState.currentEntry = null;
+                    runState.pendingEntries = [];
+                }
+                if (activeScriptRunId === runId) {
+                    activeScriptRunId = null;
+                }
+                activeScriptChild = null;
+                activeRunControl.stopRequested = false;
+                activeRunControl.skipRequested = false;
+                activeScriptChildAbortReason = null;
+                broadcastScriptStateSnapshot('run-failed');
                 closeScriptLogStream(runId, { ok: false, error: 'Failed to run scripts' });
                 return sendJson(res, 500, { error: 'Failed to run scripts' });
             }

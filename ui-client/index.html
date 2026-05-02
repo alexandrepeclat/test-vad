@@ -20,7 +20,7 @@
         }
 
         #controls {
-            width: 320px;
+            width: 500px;
             background: #ffffff;
             border: 1px solid #d5d9e2;
             border-radius: 10px;
@@ -37,17 +37,29 @@
             overflow: auto;
             border: 1px solid #e2e6ef;
             border-radius: 8px;
-            padding-left: 12px;
+            padding: 6px;
             margin: 0;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+            gap: 4px;
         }
 
         #dayList li {
-            padding: 6px 4px;
-            border-bottom: 1px solid #eef1f6;
+            border: 1px solid #e1e6f0;
+            border-radius: 6px;
+            background: #f8faff;
         }
 
-        #dayList li:last-child {
-            border-bottom: none;
+        #dayList label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 4px;
+            font-size: 11px;
+            color: #2c3750;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         #graphs {
@@ -278,6 +290,137 @@
             margin-bottom: 8px;
         }
 
+        .script-file-list {
+            border: 1px solid #e2e6ef;
+            border-radius: 8px;
+            background: #fbfcff;
+            max-height: 360px;
+            overflow: auto;
+            margin-bottom: 8px;
+        }
+
+        .script-file-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .script-file-table thead th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #f3f6fc;
+            border-bottom: 1px solid #dfe5f0;
+            padding: 2px;
+            text-align: center;
+        }
+
+        .script-file-table .script-head-first {
+            text-align: left;
+            font-size: 11px;
+            color: #51607a;
+            font-weight: 600;
+        }
+
+        .script-file-table td {
+            padding: 2px;
+            border-bottom: 1px solid #edf1f7;
+            vertical-align: middle;
+        }
+
+        .script-file-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .script-file-tag-cell {
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        .script-file-name {
+            font-family: Consolas, monospace;
+            font-size: 11px;
+            color: #243047;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .script-tag {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 40px;
+            padding: 2px 4px;
+            border-radius: 999px;
+            border: 1px solid #ccd3df;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0;
+            text-transform: lowercase;
+            background: #eef1f5;
+            color: #6c7483;
+        }
+
+        .script-tag.is-available {
+            background: #dff3e5;
+            border-color: #9ac8aa;
+            color: #1f6a3a;
+        }
+
+        .script-tag.is-missing {
+            background: #eceff4;
+            border-color: #d6dbe4;
+            color: #7a8292;
+        }
+
+        .script-tag.is-clickable {
+            cursor: pointer;
+        }
+
+        .script-tag:disabled {
+            cursor: default;
+            opacity: 0.7;
+        }
+
+        .script-tag.is-clickable.is-available {
+            background: #dff3e5;
+            border-color: #9ac8aa;
+            color: #1f6a3a;
+        }
+
+        .script-tag.is-clickable.is-missing {
+            background: #fff0d8;
+            border-color: #efc37f;
+            color: #8b5a09;
+        }
+
+        .script-tag.is-queued {
+            background: #f8d8dc;
+            border-color: #d68b96;
+            color: #8f1f32;
+        }
+
+        .script-tag.is-processing {
+            background: #d94b64;
+            border-color: #9d2037;
+            color: #fff4f5;
+        }
+
+        .script-tag.is-queued:disabled,
+        .script-tag.is-processing:disabled {
+            opacity: 1;
+        }
+
+        .script-tag.is-partial {
+            background: #d9ebff;
+            border-color: #91b8ea;
+            color: #0e4f9e;
+        }
+
+        .script-note {
+            margin-bottom: 8px;
+        }
+
         .script-actions {
             display: flex;
             gap: 6px;
@@ -309,6 +452,12 @@
             padding: 8px;
             max-height: 160px;
             overflow: auto;
+        }
+
+        #scriptQueueInfo {
+            margin: 6px 0;
+            font-size: 11px;
+            color: #5a6478;
         }
 
         @media (max-width: 1100px) {
@@ -352,18 +501,17 @@
             </div>
 
             <div class="section-title">Scripts backend</div>
-            <div class="script-list">
-                <label><input type="checkbox" class="script-check" value="run-meta-json.ps1" checked> metadata json</label>
-                <label><input type="checkbox" class="script-check" value="run-vad-pyannote.ps1" checked> vad pyannote</label>
-                <label><input type="checkbox" class="script-check" value="run-vad-silero.ps1" checked> vad silero</label>
-                <label><input type="checkbox" class="script-check" value="run-build-spectrogram.ps1" checked> build spectrogram</label>
-                <label><input type="checkbox" class="script-check" value="run-build-peaks.ps1" checked> build peaks</label>
+            <div class="small script-note">Clique sur un tag pour lancer sa génération. Le tag <strong>wav</strong> est uniquement informatif.</div>
+            <div id="scriptFileList" class="script-file-list">
+                <div class="small">Chargement des fichiers...</div>
             </div>
             <div class="script-actions">
-                <label><input type="checkbox" id="forceScriptToggle"> force</label>
-                <button id="runScriptsBtn">Lancer scripts sélectionnés</button>
+                <button id="generateMissingBtn">Générer les données manquantes</button>
+                <button id="skipTaskBtn">Skip tâche courante</button>
+                <button id="stopAllScriptsBtn">Stop + vider queue</button>
                 <button id="refreshAssetsBtn">Refresh assets</button>
             </div>
+            <div id="scriptQueueInfo">Queue: 0 en attente</div>
             <div id="scriptOutput">Aucun script lancé.</div>
         </div>
         <div id="graphs"></div>

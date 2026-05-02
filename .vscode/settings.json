@@ -3,6 +3,22 @@
         "/^node --check ui-client/client\\.js$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^node --check \\.\\\\ui-client\\\\client\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node \\.\\\\ui-server\\\\server\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --check \\.\\\\ui-server\\\\server\\.js; node --check \\.\\\\ui-client\\\\client\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --check \\.\\\\ui-client\\\\client\\.js; node --check \\.\\\\ui-server\\\\server\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

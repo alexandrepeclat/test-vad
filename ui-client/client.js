@@ -3,6 +3,14 @@ import WaveSurfer from 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js
 const state = {
     selectedDays: [],
     loadedTargets: [],
+    scriptFiles: [],
+    scriptActionQueue: [],
+    scriptQueueRunning: false,
+    activeBackendRunId: null,
+    pendingTagIds: new Set(),
+    runningTagIds: new Set(),
+    currentLogStream: null,
+    scriptStateStream: null,
     segmentCards: new Map(),
     observer: null,
     alignedWindow: {
@@ -22,12 +30,23 @@ const waveToggleEl = document.getElementById('waveToggle');
 const spectroToggleEl = document.getElementById('spectroToggle');
 const zoomInfoEl = document.getElementById('zoomInfo');
 const scriptOutputEl = document.getElementById('scriptOutput');
-const forceScriptToggleEl = document.getElementById('forceScriptToggle');
+const scriptFileListEl = document.getElementById('scriptFileList');
+const scriptQueueInfoEl = document.getElementById('scriptQueueInfo');
 
 const BASE_TIMELINE_WIDTH = 1400;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 6;
 const OVERLAY_PREFS_KEY = 'vadViewer.overlayPrefs.v1';
+const SCRIPT_QUEUE_STATE_KEY = 'vadViewer.scriptQueue.v1';
+const SCRIPT_TAGS = [
+    { key: 'wav', label: 'wav' },
+    { key: 'mp3', label: 'mp3', script: 'run-wavtomp3.ps1' },
+    { key: 'metadata', label: 'meta', script: 'run-meta-json.ps1' },
+    { key: 'pyannote', label: 'vadp', script: 'run-vad-pyannote.ps1' },
+    { key: 'silero', label: 'vads', script: 'run-vad-silero.ps1' },
+    { key: 'spectrogram', label: 'spectro', script: 'run-build-spectrogram.ps1' },
+    { key: 'peaks', label: 'peaks', script: 'run-build-peaks.ps1' }
+];
 
 state.zoom = 1;
 state.dayScrollEls = [];
@@ -152,6 +171,52 @@ function restoreOverlayPrefs() {
         if (typeof prefs.sil === 'boolean') silToggleEl.checked = prefs.sil;
         if (typeof prefs.wave === 'boolean') waveToggleEl.checked = prefs.wave;
         if (typeof prefs.spectro === 'boolean') spectroToggleEl.checked = prefs.spectro;
+    } catch {
+        // Ignore malformed localStorage payloads.
+    }
+}
+
+function normalizeQueueEntry(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const fileKey = typeof entry.fileKey === 'string' ? entry.fileKey.trim() : '';
+    const tagKey = typeof entry.tagKey === 'string' ? entry.tagKey.trim() : '';
+    if (!fileKey || !tagKey) return null;
+    return { fileKey, tagKey };
+}
+
+function persistScriptQueueState() {
+    try {
+        const entries = (state.scriptActionQueue || [])
+            .map((entry) => normalizeQueueEntry(entry))
+            .filter(Boolean);
+        localStorage.setItem(SCRIPT_QUEUE_STATE_KEY, JSON.stringify(entries));
+    } catch {
+        // Ignore localStorage write failures.
+    }
+}
+
+function restoreScriptQueueState() {
+    try {
+        const raw = localStorage.getItem(SCRIPT_QUEUE_STATE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
+
+        const restored = parsed
+            .map((entry) => normalizeQueueEntry(entry))
+            .filter(Boolean);
+
+        state.scriptActionQueue = restored;
+        state.pendingTagIds.clear();
+        restored.forEach((entry) => {
+            const tagId = getQueueEntryTagId(entry);
+            if (tagId) {
+                state.pendingTagIds.add(tagId);
+            }
+        });
+
+        updateScriptQueueInfo();
+        renderScriptFileList(state.scriptFiles || []);
     } catch {
         // Ignore malformed localStorage payloads.
     }
@@ -704,18 +769,14 @@ async function loadDayList() {
     dayListEl.innerHTML = '';
 
     days.forEach((day) => {
+        const weekday = getWeekdayFr(day);
+        const shortWeekday = weekday ? weekday.slice(0, 3) : '--';
         const li = document.createElement('li');
-        li.innerHTML = `<label><input type="checkbox" value="${day}" checked> ${day}</label>`;
+        li.innerHTML = `<label title="${day}"><input type="checkbox" value="${day}" checked> <span>${day.slice(5)} ${shortWeekday}</span></label>`;
         dayListEl.appendChild(li);
     });
 
-    if (days.length > 0) {
-        await loadSelectedDays();
-    }
-}
-
-function getSelectedScripts() {
-    return Array.from(document.querySelectorAll('.script-check:checked')).map((el) => el.value);
+    graphsEl.innerHTML = '<div class="small">Tous les jours sont précochés. Clique sur "Charger les jours" pour afficher les fichiers.</div>';
 }
 
 function createRunId() {
@@ -727,6 +788,389 @@ function appendScriptOutput(line) {
     const prev = scriptOutputEl.textContent || '';
     scriptOutputEl.textContent = prev ? `${prev}\n${line}` : line;
     scriptOutputEl.scrollTop = scriptOutputEl.scrollHeight;
+}
+
+function updateScriptQueueInfo() {
+    const pending = state.scriptActionQueue.length;
+    const running = state.runningTagIds.size > 0 || !!state.activeBackendRunId;
+    if (!scriptQueueInfoEl) return;
+    scriptQueueInfoEl.textContent = running
+        ? `Queue: ${pending} en attente | run en cours`
+        : `Queue: ${pending} en attente`;
+}
+
+function getScriptFileName(detail) {
+    const fullName = detail.displayFile || detail.audioFile || detail.processingFile || detail.baseName || '';
+    const fileName = String(fullName).split('/').pop();
+    return fileName || 'Fichier inconnu';
+}
+
+function getScriptTarget(detail, tagKey) {
+    if (tagKey === 'mp3') {
+        return detail.exists.wav ? detail.wavFile : null;
+    }
+
+    if (tagKey === 'wav') {
+        return null;
+    }
+
+    return detail.processingFile || detail.audioFile || null;
+}
+
+function getScriptTagState(detail, tagDef) {
+    const present = !!detail?.exists?.[tagDef.key];
+    const target = getScriptTarget(detail, tagDef.key) || null;
+    const fileKey = getScriptKey(detail);
+    const tagId = getTagId(fileKey, tagDef.key);
+
+    if (state.runningTagIds.has(tagId)) {
+        return {
+            status: 'processing',
+            present,
+            clickable: false,
+            target,
+            force: present,
+            tagId
+        };
+    }
+
+    if (state.pendingTagIds.has(tagId)) {
+        return {
+            status: 'queued',
+            present,
+            clickable: false,
+            target,
+            force: present,
+            tagId
+        };
+    }
+
+    if (tagDef.key === 'wav') {
+        return {
+            status: present ? 'available' : 'missing',
+            present,
+            clickable: false,
+            target: null,
+            force: false,
+            tagId
+        };
+    }
+
+    if (tagDef.key === 'mp3' && !detail?.exists?.wav) {
+        return {
+            status: 'available',
+            present,
+            clickable: false,
+            target: null,
+            force: false,
+            tagId
+        };
+    }
+
+    return {
+        status: present ? 'available' : 'missing',
+        present,
+        clickable: !!tagDef.script && !!target,
+        target,
+        force: present,
+        tagId
+    };
+}
+
+function getRunnableTaskSpec(detail, tagDef) {
+    if (!detail || !tagDef?.script || tagDef.key === 'wav') {
+        return null;
+    }
+
+    const present = !!detail?.exists?.[tagDef.key];
+    const target = getScriptTarget(detail, tagDef.key) || null;
+    if (!target) {
+        return null;
+    }
+
+    return {
+        script: tagDef.script,
+        target,
+        force: present,
+        startMessage: `${tagDef.label} | ${getScriptFileName(detail)}`
+    };
+}
+
+function getTagKeyForScript(scriptName) {
+    const def = SCRIPT_TAGS.find((tag) => tag.script === scriptName);
+    return def?.key || null;
+}
+
+function getTagId(fileKey, tagKey) {
+    if (!fileKey || !tagKey) return null;
+    return `${fileKey}::${tagKey}`;
+}
+
+function getDetailByInputPath(inputPath) {
+    if (!inputPath) return null;
+    return (state.scriptFiles || []).find((detail) => (
+        detail.processingFile === inputPath
+        || detail.audioFile === inputPath
+        || detail.wavFile === inputPath
+        || detail.mp3File === inputPath
+    )) || null;
+}
+
+function resolveTagIdFromTask(scriptName, inputPath) {
+    const tagKey = getTagKeyForScript(scriptName);
+    if (!tagKey) return null;
+
+    const detail = getDetailByInputPath(inputPath);
+    if (!detail) {
+        const stem = String(inputPath || '').replace(/\.(mp3|wav)$/i, '');
+        return getTagId(stem, tagKey);
+    }
+
+    return getTagId(getScriptKey(detail), tagKey);
+}
+
+function getScriptKey(detail) {
+    const candidate = detail.processingFile || detail.audioFile || detail.displayFile || detail.baseName || '';
+    return String(candidate).replace(/\.(mp3|wav)$/i, '');
+}
+
+function findScriptFileByKey(fileKey) {
+    return (state.scriptFiles || []).find((detail) => getScriptKey(detail) === fileKey) || null;
+}
+
+function getTagDefByKey(tagKey) {
+    return SCRIPT_TAGS.find((tag) => tag.key === tagKey) || null;
+}
+
+function createQueueEntry(fileKey, tagKey) {
+    if (!fileKey || !tagKey) return null;
+    return { fileKey, tagKey };
+}
+
+function getQueueEntryTagId(entry) {
+    if (!entry) return null;
+    return getTagId(entry.fileKey, entry.tagKey);
+}
+
+function queueEntryFromBackendTask(task) {
+    const script = typeof task?.script === 'string' ? task.script : '';
+    const target = typeof task?.target === 'string' ? task.target : '';
+    const tagKey = getTagKeyForScript(script);
+    const fileKey = String(target).replace(/\.(mp3|wav)$/i, '');
+    if (!tagKey || !fileKey) return null;
+    return { fileKey, tagKey };
+}
+
+function normalizeBackendQueueEntry(entry) {
+    const fileKey = typeof entry?.fileKey === 'string' ? entry.fileKey.trim() : '';
+    const tagKey = typeof entry?.tagKey === 'string' ? entry.tagKey.trim() : '';
+    if (!fileKey || !tagKey) return null;
+    return { fileKey, tagKey };
+}
+
+function syncQueueFromBackendRun(run) {
+    const pendingEntries = Array.isArray(run?.pendingEntries) ? run.pendingEntries : [];
+    const pendingTasks = Array.isArray(run?.pendingTasks) ? run.pendingTasks : [];
+    const sourceEntries = pendingEntries.length > 0
+        ? pendingEntries.map((entry) => normalizeBackendQueueEntry(entry)).filter(Boolean)
+        : pendingTasks.map((task) => queueEntryFromBackendTask(task)).filter(Boolean);
+    const nextEntries = [];
+    const nextTagIds = new Set();
+
+    sourceEntries.forEach((entry) => {
+        const tagId = getQueueEntryTagId(entry);
+        if (!tagId || nextTagIds.has(tagId)) return;
+        nextTagIds.add(tagId);
+        nextEntries.push(entry);
+    });
+
+    state.scriptActionQueue = nextEntries;
+    state.pendingTagIds = nextTagIds;
+    persistScriptQueueState();
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+function buildTaskFromQueueEntry(entry) {
+    const tagDef = getTagDefByKey(entry?.tagKey);
+    if (!tagDef?.script) {
+        return null;
+    }
+
+    const detail = findScriptFileByKey(entry.fileKey);
+    if (!detail) {
+        return null;
+    }
+
+    return getRunnableTaskSpec(detail, tagDef);
+}
+
+function setRunningTagByTask(scriptName, inputPath) {
+    const tagId = resolveTagIdFromTask(scriptName, inputPath);
+    if (tagId) {
+        state.pendingTagIds.delete(tagId);
+        state.runningTagIds.add(tagId);
+    }
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+function resetRunningScripts() {
+    state.runningTagIds.clear();
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+function setOnlyRunningTask(currentTask) {
+    state.runningTagIds.clear();
+    if (currentTask) {
+        const tagId = resolveTagIdFromTask(currentTask.script, currentTask.inputPath);
+        if (tagId) {
+            state.runningTagIds.add(tagId);
+        }
+    }
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+function setOnlyRunningEntry(currentEntry) {
+    state.runningTagIds.clear();
+    const normalized = normalizeBackendQueueEntry(currentEntry);
+    if (normalized) {
+        const tagId = getQueueEntryTagId(normalized);
+        if (tagId) {
+            state.runningTagIds.add(tagId);
+        }
+    }
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+function applyScriptLogEntry(entry) {
+    if (!entry || typeof entry !== 'object') return;
+
+    if (entry.type === 'run-start') {
+        state.activeBackendRunId = entry.runId || state.activeBackendRunId;
+        updateScriptQueueInfo();
+        return;
+    }
+
+    if (entry.type === 'task-start') {
+        setRunningTagByTask(entry.script, entry.inputPath);
+        appendScriptOutput(`> ${entry.script} | ${entry.inputPath || '(none)'} -> ${entry.outputPath || '(none)'}`);
+        return;
+    }
+
+    if (entry.type === 'chunk') {
+        const prefix = entry.stream === 'stderr' ? '[err]' : '[out]';
+        const lines = String(entry.text || '').split(/\r?\n/).filter(Boolean);
+        lines.forEach((line) => appendScriptOutput(`${prefix} ${line}`));
+        return;
+    }
+
+    if (entry.type === 'result') {
+        const label = entry.skipped ? 'SKIPPED' : (entry.ok ? 'OK' : 'FAILED');
+        appendScriptOutput(`${entry.script} | ${entry.inputPath || '(none)'} | ${label}${entry.reason ? ` | ${entry.reason}` : ''}`);
+        return;
+    }
+
+    if (entry.type === 'task-end') {
+        const endedTagId = resolveTagIdFromTask(entry.script, entry.inputPath);
+        if (endedTagId) {
+            state.runningTagIds.delete(endedTagId);
+            updateScriptQueueInfo();
+            // Don't render with stale scriptFiles here — refreshAfterScriptRun will
+            // fetch fresh data and render, avoiding a false orange (missing) flash.
+        }
+        const label = entry.ok ? 'OK' : 'FAILED';
+        appendScriptOutput(`< ${entry.script} | ${label} | ${entry.durationMs}ms`);
+        refreshAfterScriptRun().catch(() => {
+            // On fetch error, still re-render with whatever state we have.
+            renderScriptFileList(state.scriptFiles || []);
+        });
+        return;
+    }
+
+    if (entry.type === 'run-end') {
+        state.activeBackendRunId = null;
+        resetRunningScripts();
+        updateScriptQueueInfo();
+        if (entry.summary) {
+            appendScriptOutput(`summary: total=${entry.summary.total} ok=${entry.summary.success} failed=${entry.summary.failed}`);
+        }
+        refreshAfterScriptRun().catch(() => {
+            // Best effort refresh after the run completes.
+        });
+    }
+
+    if (entry.type === 'control') {
+        appendScriptOutput(`control: ${entry.action}`);
+    }
+}
+
+function applyBackendStateSnapshot(payload) {
+    if (!payload || typeof payload !== 'object') return;
+
+    if (!payload.hasActiveRun || !payload.activeRunId) {
+        state.activeBackendRunId = null;
+        resetRunningScripts();
+        state.scriptActionQueue = [];
+        state.pendingTagIds.clear();
+        persistScriptQueueState();
+        updateScriptQueueInfo();
+        renderScriptFileList(state.scriptFiles || []);
+        return;
+    }
+
+    state.activeBackendRunId = payload.activeRunId;
+    syncQueueFromBackendRun(payload.run || null);
+    if (payload.run?.currentEntry) {
+        setOnlyRunningEntry(payload.run.currentEntry);
+    } else {
+        setOnlyRunningTask(payload.run?.currentTask || null);
+    }
+    updateScriptQueueInfo();
+}
+
+function connectScriptStateStream() {
+    if (!window.EventSource || state.scriptStateStream) {
+        return;
+    }
+
+    const es = new EventSource('/api/scripts/stream');
+    state.scriptStateStream = es;
+
+    es.addEventListener('snapshot', (event) => {
+        try {
+            const payload = JSON.parse(event.data || '{}');
+            applyBackendStateSnapshot(payload);
+        } catch {
+            // Ignore malformed snapshot payloads.
+        }
+    });
+
+    es.addEventListener('state', (event) => {
+        try {
+            const entry = JSON.parse(event.data || '{}');
+            if (state.currentLogStream && entry?.runId && state.currentLogStream.runId === entry.runId) {
+                return;
+            }
+
+            applyScriptLogEntry(entry);
+
+            if (entry?.type === 'run-start' || entry?.type === 'task-start' || entry?.type === 'task-end' || entry?.type === 'run-end') {
+                syncBackendRunState().catch(() => {
+                    // Ignore transient sync failures.
+                });
+            }
+        } catch {
+            // Ignore malformed state payloads.
+        }
+    });
+
+    es.onerror = () => {
+        // Browser EventSource handles reconnection automatically.
+    };
 }
 
 function connectScriptLogStream(runId) {
@@ -753,9 +1197,20 @@ function connectScriptLogStream(runId) {
         isDone = true;
         resolveDone();
         es.close();
+        if (state.currentLogStream && state.currentLogStream.runId === runId) {
+            state.currentLogStream = null;
+        }
     };
 
+    if (state.currentLogStream && typeof state.currentLogStream.close === 'function') {
+        state.currentLogStream.close();
+    }
+
     const es = new EventSource(`/api/scripts/logs?runId=${encodeURIComponent(runId)}`);
+    state.currentLogStream = {
+        runId,
+        close: finalize
+    };
 
     es.addEventListener('ready', () => {
         resolveReady(true);
@@ -764,34 +1219,7 @@ function connectScriptLogStream(runId) {
     es.addEventListener('log', (event) => {
         try {
             const entry = JSON.parse(event.data || '{}');
-
-            if (entry.type === 'task-start') {
-                appendScriptOutput(`> ${entry.script} | ${entry.inputPath || '(none)'} -> ${entry.outputPath || '(none)'}`);
-                return;
-            }
-
-            if (entry.type === 'chunk') {
-                const prefix = entry.stream === 'stderr' ? '[err]' : '[out]';
-                const lines = String(entry.text || '').split(/\r?\n/).filter(Boolean);
-                lines.forEach((line) => appendScriptOutput(`${prefix} ${line}`));
-                return;
-            }
-
-            if (entry.type === 'result') {
-                const label = entry.skipped ? 'SKIPPED' : (entry.ok ? 'OK' : 'FAILED');
-                appendScriptOutput(`${entry.script} | ${entry.inputPath || '(none)'} | ${label}${entry.reason ? ` | ${entry.reason}` : ''}`);
-                return;
-            }
-
-            if (entry.type === 'task-end') {
-                const label = entry.ok ? 'OK' : 'FAILED';
-                appendScriptOutput(`< ${entry.script} | ${label} | ${entry.durationMs}ms`);
-                return;
-            }
-
-            if (entry.type === 'run-end' && entry.summary) {
-                appendScriptOutput(`summary: total=${entry.summary.total} ok=${entry.summary.success} failed=${entry.summary.failed}`);
-            }
+            applyScriptLogEntry(entry);
         } catch {
             // Ignore malformed SSE payloads.
         }
@@ -810,24 +1238,22 @@ function connectScriptLogStream(runId) {
     return {
         ready,
         done,
+        runId,
         close: finalize
     };
 }
 
-async function runScriptsOnLoadedTargets() {
-    const scripts = getSelectedScripts();
-    if (scripts.length === 0) {
-        scriptOutputEl.textContent = 'Selectionne au moins un script.';
-        return;
-    }
-    if (state.loadedTargets.length === 0) {
-        scriptOutputEl.textContent = 'Charge d\'abord un ou plusieurs jours.';
-        return;
+async function runScriptTasks(tasks, { startMessage = 'Execution scripts en cours...', force = false } = {}) {
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+        scriptOutputEl.textContent = 'Aucune tâche à lancer.';
+        return null;
     }
 
-    scriptOutputEl.textContent = 'Execution scripts en cours...';
+    scriptOutputEl.textContent = startMessage;
 
     const runId = createRunId();
+    state.activeBackendRunId = runId;
+    updateScriptQueueInfo();
     const logStream = connectScriptLogStream(runId);
     await Promise.race([
         logStream.ready,
@@ -839,14 +1265,27 @@ async function runScriptsOnLoadedTargets() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             runId,
-            scripts,
-            targets: state.loadedTargets,
-            force: forceScriptToggleEl.checked,
+            tasks: tasks.map((task) => ({
+                script: task.script,
+                target: task.target,
+                force: typeof task.force === 'boolean' ? task.force : force,
+                fileKey: String(task.target || '').replace(/\.(mp3|wav)$/i, ''),
+                tagKey: getTagKeyForScript(task.script)
+            })),
+            force,
             continueOnError: true
         })
     });
 
     const payload = await res.json();
+
+    if (res.status === 409 && payload?.activeRunId) {
+        state.activeBackendRunId = payload.activeRunId;
+        const conflictErr = new Error('Un script est déjà en cours sur le backend.');
+        conflictErr.code = 'ACTIVE_RUN';
+        conflictErr.activeRunId = payload.activeRunId;
+        throw conflictErr;
+    }
 
     await Promise.race([
         logStream.done,
@@ -871,15 +1310,529 @@ async function runScriptsOnLoadedTargets() {
         }
     });
 
-    if (!scriptOutputEl.textContent || scriptOutputEl.textContent.trim() === 'Execution scripts en cours...') {
+    if (!scriptOutputEl.textContent || scriptOutputEl.textContent.trim() === startMessage) {
         scriptOutputEl.textContent = lines.join('\n') || JSON.stringify(payload, null, 2);
     } else {
         appendScriptOutput('--- final ---');
         lines.forEach((line) => appendScriptOutput(line));
     }
 
+    if (!res.ok) {
+        throw new Error(payload.error || 'Erreur execution scripts');
+    }
+
+    return payload;
+}
+
+async function appendTasksToBackendQueue(tasks) {
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+        return { ok: true, appended: 0 };
+    }
+
+    const res = await fetch('/api/scripts/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            tasks: tasks.map((task) => ({
+                script: task.script,
+                target: task.target,
+                force: !!task.force,
+                fileKey: String(task.target || '').replace(/\.(mp3|wav)$/i, ''),
+                tagKey: getTagKeyForScript(task.script)
+            }))
+        })
+    });
+
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        const err = new Error(payload.error || 'Impossible d\'ajouter des tâches à la queue backend.');
+        if (res.status === 409) {
+            err.code = 'NO_ACTIVE_RUN';
+        }
+        throw err;
+    }
+
+    if (payload?.run) {
+        syncQueueFromBackendRun(payload.run);
+    }
+
+    return payload;
+}
+
+async function refreshAfterScriptRun() {
+    await loadScriptFileList();
     if (state.selectedDays.length > 0) {
         await loadSelectedDays();
+    }
+}
+
+function enqueueTagQueueEntries(entries = []) {
+    const accepted = [];
+
+    (entries || []).forEach((entry) => {
+        const tagId = getQueueEntryTagId(entry);
+        if (!tagId) return;
+        if (state.pendingTagIds.has(tagId) || state.runningTagIds.has(tagId)) {
+            return;
+        }
+        accepted.push(entry);
+        state.pendingTagIds.add(tagId);
+    });
+
+    if (accepted.length === 0) {
+        renderScriptFileList(state.scriptFiles || []);
+        return;
+    }
+
+    state.scriptActionQueue.push(...accepted);
+    persistScriptQueueState();
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+    processScriptActionQueue().catch((err) => {
+        console.error(err);
+        scriptOutputEl.textContent = err.message || 'Erreur execution scripts.';
+    });
+}
+
+async function processScriptActionQueue() {
+    // Fast path: if the queue runner is already active but a backend run is in
+    // progress, directly append any newly-queued tasks to the backend instead of
+    // waiting for the runner to unblock (it blocks on the HTTP response from
+    // /api/scripts/run for the duration of the entire run).
+    if (state.scriptQueueRunning) {
+        if (state.activeBackendRunId && state.scriptActionQueue.length > 0) {
+            const toAppend = state.scriptActionQueue.splice(0);
+            persistScriptQueueState();
+            try {
+                await loadScriptFileList();
+                const tasks = toAppend
+                    .map((e) => buildTaskFromQueueEntry(e))
+                    .filter(Boolean)
+                    .map((t) => ({ script: t.script, target: t.target, force: !!t.force }));
+                if (tasks.length > 0) {
+                    await appendTasksToBackendQueue(tasks);
+                    // syncQueueFromBackendRun inside appendTasksToBackendQueue has
+                    // already updated pendingTagIds from the backend snapshot.
+                    // Do NOT clear them here or the tags will lose their color.
+                }
+            } catch (err) {
+                console.error(err);
+                state.scriptActionQueue = toAppend.concat(state.scriptActionQueue);
+            } finally {
+                persistScriptQueueState();
+                renderScriptFileList(state.scriptFiles || []);
+            }
+        }
+        return;
+    }
+    state.scriptQueueRunning = true;
+    updateScriptQueueInfo();
+
+    while (state.scriptActionQueue.length > 0) {
+        const currentBatch = state.scriptActionQueue.splice(0, state.scriptActionQueue.length);
+        persistScriptQueueState();
+        const batchTagIds = currentBatch
+            .map((entry) => getQueueEntryTagId(entry))
+            .filter(Boolean);
+        updateScriptQueueInfo();
+        let submitted = false;
+        let usedAppendPath = false;
+        try {
+            await loadScriptFileList();
+            const tasks = currentBatch
+                .map((entry) => buildTaskFromQueueEntry(entry))
+                .filter(Boolean)
+                .map((task) => ({
+                    script: task.script,
+                    target: task.target,
+                    force: !!task.force
+                }));
+
+            if (tasks.length === 0) {
+                submitted = true;
+                continue;
+            }
+
+            if (state.activeBackendRunId) {
+                await appendTasksToBackendQueue(tasks);
+                usedAppendPath = true;
+                // appendTasksToBackendQueue called syncQueueFromBackendRun which
+                // set scriptActionQueue to the backend's pendingEntries. Clear it
+                // so the while loop doesn't keep re-processing backend-owned tasks.
+                state.scriptActionQueue = [];
+            } else {
+                await runScriptTasks(tasks, {
+                    startMessage: `Execution de ${tasks.length} tâche(s)...`
+                });
+            }
+            submitted = true;
+        } catch (err) {
+            if (err?.code === 'ACTIVE_RUN') {
+                // Backend run exists: keep tasks and try append path on next loop.
+                state.activeBackendRunId = err.activeRunId || state.activeBackendRunId;
+            }
+            console.error(err);
+            if (err?.code !== 'ACTIVE_RUN') {
+                scriptOutputEl.textContent = err.message || 'Erreur execution scripts.';
+            }
+            state.scriptActionQueue = currentBatch.concat(state.scriptActionQueue);
+            persistScriptQueueState();
+            await syncBackendRunState().catch(() => {
+                // Ignore transient sync failures.
+            });
+            break;
+        } finally {
+            if (submitted && !usedAppendPath) {
+                // For the append path pendingTagIds are already correctly set by
+                // syncQueueFromBackendRun inside appendTasksToBackendQueue.
+                // Only clean up for the new-run path.
+                batchTagIds.forEach((tagId) => state.pendingTagIds.delete(tagId));
+            }
+            persistScriptQueueState();
+            renderScriptFileList(state.scriptFiles || []);
+        }
+    }
+
+    state.scriptQueueRunning = false;
+    updateScriptQueueInfo();
+}
+
+function clearScriptActionQueue() {
+    state.scriptActionQueue.forEach((entry) => {
+        const tagId = getQueueEntryTagId(entry);
+        if (tagId) {
+            state.pendingTagIds.delete(tagId);
+        }
+    });
+    state.scriptActionQueue = [];
+    persistScriptQueueState();
+    updateScriptQueueInfo();
+    renderScriptFileList(state.scriptFiles || []);
+}
+
+async function sendScriptControl(action) {
+    const res = await fetch('/api/scripts/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+    });
+
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        throw new Error(payload.error || `Impossible d'envoyer ${action}`);
+    }
+
+    return payload;
+}
+
+async function syncBackendRunState() {
+    const res = await fetch('/api/scripts/state');
+    if (!res.ok) return;
+
+    const payload = await res.json();
+    if (!payload?.hasActiveRun || !payload?.activeRunId) {
+        state.activeBackendRunId = null;
+        if (!state.currentLogStream) {
+            resetRunningScripts();
+        }
+        updateScriptQueueInfo();
+        return;
+    }
+
+    state.activeBackendRunId = payload.activeRunId;
+    syncQueueFromBackendRun(payload.run || null);
+    updateScriptQueueInfo();
+
+    if (payload.run?.currentEntry) {
+        setOnlyRunningEntry(payload.run.currentEntry);
+    } else {
+        const currentTask = payload.run?.currentTask || null;
+        setOnlyRunningTask(currentTask);
+    }
+}
+
+async function runSingleTag(detail, tagDef) {
+    const fileKey = getScriptKey(detail);
+    const entry = createQueueEntry(fileKey, tagDef.key);
+    enqueueTagQueueEntries([entry]);
+}
+
+function buildMissingQueueEntriesForTag(files, tagDef) {
+    if (!tagDef?.script) return [];
+
+    const entries = [];
+    const seen = new Set();
+
+    (files || []).forEach((detail) => {
+        const tagState = getScriptTagState(detail, tagDef);
+        if (tagState.status !== 'missing' || !tagState.clickable) {
+            return;
+        }
+
+        const fileKey = getScriptKey(detail);
+        const key = getTagId(fileKey, tagDef.key);
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        entries.push(createQueueEntry(fileKey, tagDef.key));
+    });
+
+    return entries;
+}
+
+function buildForceQueueEntriesForTag(files, tagDef) {
+    if (!tagDef?.script) return [];
+
+    const entries = [];
+    const seen = new Set();
+
+    (files || []).forEach((detail) => {
+        const tagState = getScriptTagState(detail, tagDef);
+        const taskSpec = getRunnableTaskSpec(detail, tagDef);
+        if (tagState.status !== 'available' || !taskSpec) {
+            return;
+        }
+
+        const fileKey = getScriptKey(detail);
+        const key = getTagId(fileKey, tagDef.key);
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        entries.push(createQueueEntry(fileKey, tagDef.key));
+    });
+
+    return entries;
+}
+
+function getColumnState(files, tagDef) {
+    const states = (files || []).map((detail) => getScriptTagState(detail, tagDef));
+    const total = states.length;
+    const availableCount = states.filter((tagState) => tagState.status === 'available').length;
+    const activeCount = states.filter((tagState) => tagState.status === 'queued' || tagState.status === 'processing').length;
+    return {
+        total,
+        availableCount,
+        activeCount,
+        missingCount: Math.max(0, total - availableCount),
+        allPresent: total > 0 && availableCount === total,
+        partiallyAvailable: availableCount > 0 && availableCount < total,
+        allActive: tagDef.script && total > 0 && activeCount === total
+    };
+}
+
+async function runMissingForTag(tagDef) {
+    if (!tagDef?.script) return;
+
+    await loadScriptFileList();
+    const entries = buildMissingQueueEntriesForTag(state.scriptFiles || [], tagDef);
+    if (entries.length === 0) {
+        scriptOutputEl.textContent = `Aucune donnée manquante pour ${tagDef.label}.`;
+        return;
+    }
+
+    enqueueTagQueueEntries(entries);
+}
+
+async function runForceForTag(tagDef) {
+    if (!tagDef?.script) return;
+
+    await loadScriptFileList();
+    const entries = buildForceQueueEntriesForTag(state.scriptFiles || [], tagDef);
+    if (entries.length === 0) {
+        scriptOutputEl.textContent = `Aucun fichier disponible à régénérer pour ${tagDef.label}.`;
+        return;
+    }
+
+    const confirmed = window.confirm(`Tous les fichiers ont déjà ${tagDef.label}. Relancer ${entries.length} fichier(s) avec --force ?`);
+    if (!confirmed) {
+        return;
+    }
+
+    enqueueTagQueueEntries(entries);
+}
+
+function buildMissingQueueEntries(files) {
+    const entries = [];
+    SCRIPT_TAGS.forEach((tagDef) => {
+        entries.push(...buildMissingQueueEntriesForTag(files, tagDef));
+    });
+
+    return entries;
+}
+
+function renderScriptFileList(files) {
+    scriptFileListEl.innerHTML = '';
+
+    if (!Array.isArray(files) || files.length === 0) {
+        scriptFileListEl.innerHTML = '<div class="small">Aucun fichier audio trouvé.</div>';
+        return;
+    }
+
+    const table = document.createElement('table');
+    table.className = 'script-file-table';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+
+    const nameHead = document.createElement('th');
+    nameHead.className = 'script-head-first';
+    nameHead.textContent = 'fichier';
+    headRow.appendChild(nameHead);
+
+    SCRIPT_TAGS.forEach((tagDef) => {
+        const stateByCol = getColumnState(files, tagDef);
+        const th = document.createElement('th');
+        th.className = 'script-file-tag-cell';
+
+        const headTag = document.createElement('button');
+        headTag.type = 'button';
+        headTag.className = 'script-tag';
+        headTag.textContent = tagDef.label;
+
+        if (stateByCol.allActive) {
+            headTag.classList.add('is-processing');
+        } else if (stateByCol.allPresent) {
+            headTag.classList.add('is-available');
+        } else if (stateByCol.partiallyAvailable) {
+            headTag.classList.add('is-partial');
+        } else {
+            headTag.classList.add('is-missing');
+        }
+
+        if (tagDef.script) {
+            if (stateByCol.allActive) {
+                headTag.disabled = true;
+                headTag.title = `Une tâche ${tagDef.label} existe déjà pour chaque fichier.`;
+            } else {
+                headTag.title = stateByCol.missingCount > 0
+                    ? `Lancer ${tagDef.label} sur ${stateByCol.missingCount} fichier(s) manquant(s).`
+                    : `Tous les fichiers ont déjà ${tagDef.label}. Cliquer pour relancer en --force (avec confirmation).`;
+                headTag.onclick = () => {
+                    const action = stateByCol.allPresent ? runForceForTag(tagDef) : runMissingForTag(tagDef);
+                    action.catch((err) => {
+                        console.error(err);
+                        scriptOutputEl.textContent = err.message || 'Erreur execution scripts.';
+                    });
+                };
+            }
+        } else {
+            headTag.disabled = true;
+            headTag.title = 'Le wav est informatif uniquement.';
+        }
+
+        th.appendChild(headTag);
+        headRow.appendChild(th);
+    });
+
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+
+    files.forEach((detail) => {
+        const row = document.createElement('tr');
+
+        const nameCell = document.createElement('td');
+        nameCell.className = 'script-file-name-cell';
+
+        const nameEl = document.createElement('div');
+        nameEl.className = 'script-file-name';
+        nameEl.textContent = getScriptFileName(detail);
+        nameCell.appendChild(nameEl);
+        row.appendChild(nameCell);
+
+        SCRIPT_TAGS.forEach((tagDef) => {
+            const tagState = getScriptTagState(detail, tagDef);
+            const tagCell = document.createElement('td');
+            tagCell.className = 'script-file-tag-cell';
+            const tagEl = document.createElement('button');
+            tagEl.type = 'button';
+            tagEl.className = 'script-tag';
+            tagEl.textContent = tagDef.label;
+
+            if (tagState.status === 'available') {
+                tagEl.classList.add('is-available');
+            } else if (tagState.status === 'missing') {
+                tagEl.classList.add('is-missing');
+            } else if (tagState.status === 'queued') {
+                tagEl.classList.add('is-queued');
+            } else if (tagState.status === 'processing') {
+                tagEl.classList.add('is-processing');
+            }
+
+            if (tagState.clickable) {
+                tagEl.classList.add('is-clickable');
+                tagEl.title = tagState.present
+                    ? 'Cliquer pour régénérer ce fichier avec --force.'
+                    : 'Cliquer pour générer ce fichier.';
+                tagEl.onclick = () => {
+                    runSingleTag(detail, tagDef);
+                };
+            } else {
+                tagEl.disabled = true;
+                if (tagDef.key === 'wav') {
+                    tagEl.title = 'Le wav est informatif uniquement.';
+                } else if (tagDef.key === 'mp3' && !detail?.exists?.wav) {
+                    tagEl.title = 'MP3 non lançable sans wav source.';
+                } else if (tagState.status === 'queued') {
+                    tagEl.title = 'Script en attente pour ce tag.';
+                } else if (tagState.status === 'processing') {
+                    tagEl.title = 'Script en cours pour ce tag.';
+                }
+            }
+
+            tagCell.appendChild(tagEl);
+            row.appendChild(tagCell);
+        });
+
+        tbody.appendChild(row);
+    });
+
+    table.appendChild(tbody);
+    scriptFileListEl.appendChild(table);
+}
+
+async function loadScriptFileList() {
+    const res = await fetch('/api/script-files');
+    if (!res.ok) {
+        throw new Error('Failed to load script files');
+    }
+
+    const files = await res.json();
+    state.scriptFiles = Array.isArray(files) ? files : [];
+    renderScriptFileList(state.scriptFiles);
+}
+
+async function generateMissingData() {
+    await loadScriptFileList();
+    const entries = buildMissingQueueEntries(state.scriptFiles || []);
+    if (entries.length === 0) {
+        scriptOutputEl.textContent = 'Aucune donnée manquante à générer.';
+        return;
+    }
+
+    enqueueTagQueueEntries(entries);
+}
+
+async function restoreActiveRunFromBackend() {
+    try {
+        scriptOutputEl.textContent = 'Vérification des scripts backend en cours...';
+        await syncBackendRunState();
+        if (state.activeBackendRunId) {
+            scriptOutputEl.textContent = 'Run backend en cours, rattachement des logs...';
+        } else if (state.scriptActionQueue.length > 0) {
+            scriptOutputEl.textContent = `Reprise de la queue locale (${state.scriptActionQueue.length} tâche(s))...`;
+            processScriptActionQueue().catch((err) => {
+                console.error(err);
+                scriptOutputEl.textContent = err.message || 'Erreur execution scripts.';
+            });
+        }
+    } catch {
+        // Best effort only: UI remains usable even if state restore fails.
     }
 }
 
@@ -903,16 +1856,35 @@ document.getElementById('loadDaysBtn').onclick = () => {
 };
 
 document.getElementById('refreshAssetsBtn').onclick = () => {
-    if (state.selectedDays.length > 0) {
-        loadSelectedDays().catch(console.error);
-    }
+    Promise.all([
+        loadScriptFileList(),
+        state.selectedDays.length > 0 ? loadSelectedDays() : Promise.resolve()
+    ]).catch(console.error);
 };
 
-document.getElementById('runScriptsBtn').onclick = () => {
-    runScriptsOnLoadedTargets().catch((err) => {
-        console.error(err);
-        scriptOutputEl.textContent = 'Erreur execution scripts.';
-    });
+document.getElementById('generateMissingBtn').onclick = () => {
+    generateMissingData();
+};
+
+document.getElementById('stopAllScriptsBtn').onclick = () => {
+    clearScriptActionQueue();
+    sendScriptControl('stop')
+        .then(() => {
+            appendScriptOutput('STOP demandé: run courant interrompu et queue vidée.');
+        })
+        .catch((err) => {
+            scriptOutputEl.textContent = err.message || 'Impossible de stopper le run.';
+        });
+};
+
+document.getElementById('skipTaskBtn').onclick = () => {
+    sendScriptControl('skip')
+        .then(() => {
+            appendScriptOutput('SKIP demandé: tâche courante interrompue.');
+        })
+        .catch((err) => {
+            scriptOutputEl.textContent = err.message || 'Impossible de skip la tâche courante.';
+        });
 };
 
 document.getElementById('invertBtn').onclick = () => {
@@ -941,19 +1913,6 @@ spectroToggleEl.onchange = () => {
     state.segmentCards.forEach((card) => applyLayerVisibility(card));
 };
 
-forceScriptToggleEl.onchange = () => {
-    const checks = Array.from(document.querySelectorAll('.script-check'));
-    if (forceScriptToggleEl.checked) {
-        checks.forEach((el) => {
-            el.checked = false;
-        });
-    } else {
-        checks.forEach((el) => {
-            el.checked = true;
-        });
-    }
-};
-
 window.addEventListener('resize', () => {
     state.segmentCards.forEach((card) => {
         if (!card.initialized) return;
@@ -972,5 +1931,16 @@ loadDayList().catch((err) => {
     dayListEl.innerHTML = '<li>Erreur lors du chargement des jours.</li>';
 });
 
+restoreScriptQueueState();
+connectScriptStateStream();
+
+loadScriptFileList().catch((err) => {
+    console.error(err);
+    scriptFileListEl.innerHTML = '<div class="small error">Impossible de charger la liste des fichiers.</div>';
+});
+
+restoreActiveRunFromBackend();
+
 restoreOverlayPrefs();
 applyZoom();
+updateScriptQueueInfo();
