@@ -20,7 +20,7 @@
         }
 
         #controls {
-            width: 500px;
+            width: 560px;
             background: #ffffff;
             border: 1px solid #d5d9e2;
             border-radius: 10px;
@@ -39,18 +39,37 @@
             border-radius: 8px;
             padding: 6px;
             margin: 0;
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+            display: flex;
+            flex-direction: column;
             gap: 4px;
         }
 
-        #dayList li {
+        #dayList .day-week-row {
+            display: block;
+        }
+
+        .day-week-grid {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 4px;
+            margin: 0;
+            padding: 0;
+        }
+
+        .day-week-cell {
             border: 1px solid #e1e6f0;
             border-radius: 6px;
             background: #f8faff;
         }
 
-        #dayList label {
+        .day-week-cell.is-empty {
+            background: #f3f5fa;
+            border-style: dashed;
+            min-height: 22px;
+        }
+
+        .day-week-cell label {
             display: flex;
             align-items: center;
             gap: 4px;
@@ -310,7 +329,7 @@
             z-index: 2;
             background: #f3f6fc;
             border-bottom: 1px solid #dfe5f0;
-            padding: 2px;
+            padding: 1px;
             text-align: center;
         }
 
@@ -322,9 +341,13 @@
         }
 
         .script-file-table td {
-            padding: 2px;
+            padding: 1px;
             border-bottom: 1px solid #edf1f7;
             vertical-align: middle;
+        }
+
+        .script-file-name-cell {
+            padding: 1px;
         }
 
         .script-file-table tr:last-child td {

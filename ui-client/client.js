@@ -152,6 +152,46 @@ function getWeekdayFr(dayIso) {
     }
 }
 
+function parseIsoDay(dayIso) {
+    const m = String(dayIso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (!Number.isInteger(y) || !Number.isInteger(mo) || !Number.isInteger(d)) return null;
+    return new Date(Date.UTC(y, mo - 1, d));
+}
+
+function toIsoDay(dateObj) {
+    if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return '';
+    const y = dateObj.getUTCFullYear();
+    const m = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dateObj.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function addDaysIso(dayIso, dayDelta) {
+    const base = parseIsoDay(dayIso);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + dayDelta);
+    return toIsoDay(base);
+}
+
+function formatIsoDayShort(dayIso) {
+    const m = String(dayIso || '').match(/^\d{4}-(\d{2})-(\d{2})$/);
+    if (!m) return String(dayIso || '');
+    return `${m[2]}.${m[1]}`;
+}
+
+function getWeekStartIso(dayIso) {
+    const d = parseIsoDay(dayIso);
+    if (!d) return '';
+    const dow = d.getUTCDay();
+    const mondayOffset = (dow + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - mondayOffset);
+    return toIsoDay(d);
+}
+
 function saveOverlayPrefs() {
     const prefs = {
         py: !!pyToggleEl.checked,
@@ -768,12 +808,62 @@ async function loadDayList() {
     const days = await res.json();
     dayListEl.innerHTML = '';
 
-    days.forEach((day) => {
-        const weekday = getWeekdayFr(day);
-        const shortWeekday = weekday ? weekday.slice(0, 3) : '--';
-        const li = document.createElement('li');
-        li.innerHTML = `<label title="${day}"><input type="checkbox" value="${day}" checked> <span>${day.slice(5)} ${shortWeekday}</span></label>`;
-        dayListEl.appendChild(li);
+    const uniqueDays = Array.from(new Set((Array.isArray(days) ? days : [])
+        .map((day) => String(day || '').trim())
+        .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day))
+    )).sort((a, b) => a.localeCompare(b, 'en'));
+
+    const byWeek = new Map();
+    uniqueDays.forEach((day) => {
+        const weekStart = getWeekStartIso(day);
+        if (!weekStart) return;
+        if (!byWeek.has(weekStart)) {
+            byWeek.set(weekStart, new Set());
+        }
+        byWeek.get(weekStart).add(day);
+    });
+
+    Array.from(byWeek.keys()).sort((a, b) => a.localeCompare(b, 'en')).forEach((weekStart) => {
+        const weekDays = byWeek.get(weekStart) || new Set();
+
+        const weekRow = document.createElement('li');
+        weekRow.className = 'day-week-row';
+
+        const weekGrid = document.createElement('ul');
+        weekGrid.className = 'day-week-grid';
+
+        for (let i = 0; i < 7; i += 1) {
+            const dayIso = addDaysIso(weekStart, i);
+            const cell = document.createElement('li');
+            cell.className = 'day-week-cell';
+
+            if (!dayIso || !weekDays.has(dayIso)) {
+                cell.classList.add('is-empty');
+                weekGrid.appendChild(cell);
+                continue;
+            }
+
+            const weekday = getWeekdayFr(dayIso);
+            const shortWeekday = weekday ? weekday.slice(0, 3) : '--';
+            const label = document.createElement('label');
+            label.title = dayIso;
+
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.value = dayIso;
+            input.checked = true;
+
+            const span = document.createElement('span');
+            span.textContent = `${formatIsoDayShort(dayIso)} ${shortWeekday}`;
+
+            label.appendChild(input);
+            label.appendChild(span);
+            cell.appendChild(label);
+            weekGrid.appendChild(cell);
+        }
+
+        weekRow.appendChild(weekGrid);
+        dayListEl.appendChild(weekRow);
     });
 
     graphsEl.innerHTML = '<div class="small">Tous les jours sont précochés. Clique sur "Charger les jours" pour afficher les fichiers.</div>';
