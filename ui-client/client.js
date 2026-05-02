@@ -1152,7 +1152,19 @@ function connectScriptStateStream() {
     es.addEventListener('state', (event) => {
         try {
             const entry = JSON.parse(event.data || '{}');
-            if (state.currentLogStream && entry?.runId && state.currentLogStream.runId === entry.runId) {
+            const isCurrentRunLogEntry = state.currentLogStream && entry?.runId && state.currentLogStream.runId === entry.runId;
+            if (isCurrentRunLogEntry) {
+                if (entry?.type === 'task-end' || entry?.type === 'run-end') {
+                    refreshAfterScriptRun().catch(() => {
+                        renderScriptFileList(state.scriptFiles || []);
+                    });
+                }
+
+                if (entry?.type === 'run-start' || entry?.type === 'task-start' || entry?.type === 'task-end' || entry?.type === 'run-end') {
+                    syncBackendRunState().catch(() => {
+                        // Ignore transient sync failures.
+                    });
+                }
                 return;
             }
 
