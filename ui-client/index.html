@@ -444,6 +444,29 @@
             margin-bottom: 8px;
         }
 
+        .copy-sd-status {
+            font-size: 11px;
+            color: #5a6478;
+            min-width: 60px;
+            display: inline-block;
+        }
+
+        .copy-sd-status.queued { color: #8f6200; }
+
+        .copy-sd-status.running {
+            color: #8f1f32;
+            animation: blink 0.9s step-end infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.25; }
+        }
+
+        .copy-sd-row {
+            margin-bottom: 6px;
+        }
+
         .script-actions {
             display: flex;
             gap: 6px;
@@ -524,6 +547,10 @@
             </div>
 
             <div class="section-title">Scripts backend</div>
+            <div class="script-actions copy-sd-row">
+                <button id="copyFromSdBtn">Copy from SD</button>
+                <span id="copyFromSdStatus" class="copy-sd-status"></span>
+            </div>
             <div class="small script-note">Clique sur un tag pour lancer sa génération. Le tag <strong>wav</strong> est uniquement informatif.</div>
             <div id="scriptFileList" class="script-file-list">
                 <div class="small">Chargement des fichiers...</div>
@@ -531,7 +558,7 @@
             <div class="script-actions">
                 <button id="generateMissingBtn">Générer les données manquantes</button>
                 <button id="skipTaskBtn">Skip tâche courante</button>
-                <button id="stopAllScriptsBtn">Stop + vider queue</button>
+                <button id="stopAllScriptsBtn">Stop run courant</button>
                 <button id="refreshAssetsBtn">Refresh assets</button>
             </div>
             <div id="scriptQueueInfo">Queue: 0 en attente</div>

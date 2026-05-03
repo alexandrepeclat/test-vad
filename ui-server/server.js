@@ -29,8 +29,23 @@ const SCRIPT_ALLOWLIST = new Set([
     'run-vad-pyannote.ps1',
     'run-vad-silero.ps1',
     'run-build-spectrogram.ps1',
-    'run-build-peaks.ps1'
+    'run-build-peaks.ps1',
+    'run-sd-copy.ps1'
 ]);
+
+// TASK_FACTORY is the sole authority mapping taskKey → script + whether it needs a file target.
+const TASK_FACTORY = {
+    mp3:         { script: 'run-wavtomp3.ps1',           needsFile: true  },
+    metadata:    { script: 'run-meta-json.ps1',          needsFile: true  },
+    pyannote:    { script: 'run-vad-pyannote.ps1',       needsFile: true  },
+    silero:      { script: 'run-vad-silero.ps1',         needsFile: true  },
+    spectrogram: { script: 'run-build-spectrogram.ps1',  needsFile: true  },
+    peaks:       { script: 'run-build-peaks.ps1',        needsFile: true  },
+    copyfromsd:  { script: 'run-sd-copy.ps1',            needsFile: false }
+};
+
+// Server-owned task queue. Each entry: { taskKey, fileKey (or null), taskId }
+let taskQueue = [];
 
 const MIME = {
     '.html': 'text/html',
@@ -230,7 +245,8 @@ function buildScriptStateSnapshotPayload() {
         return {
             hasActiveRun: false,
             activeRunId: null,
-            run: null
+            run: null,
+            queue: taskQueue.slice()
         };
     }
 
@@ -254,7 +270,8 @@ function buildScriptStateSnapshotPayload() {
                 pendingEntries: snapshot.pendingEntries,
                 summary: snapshot.summary
             }
-            : null
+            : null,
+        queue: taskQueue.slice()
     };
 }
 
@@ -632,6 +649,17 @@ function getTagKeyForScript(scriptName) {
     return null;
 }
 
+// Preferred alias — includes copyfromsd lookup via TASK_FACTORY
+function getTaskKeyForScript(scriptName) {
+    const entry = Object.entries(TASK_FACTORY).find(([, v]) => v.script === scriptName);
+    return entry ? entry[0] : null;
+}
+
+function makeTaskId(taskKey, fileKey) {
+    if (!taskKey) return null;
+    return fileKey ? `${taskKey}::${fileKey}` : taskKey;
+}
+
 function getFileKeyFromTarget(targetRelPath) {
     if (typeof targetRelPath !== 'string') return null;
     const trimmed = targetRelPath.trim();
@@ -651,20 +679,26 @@ function normalizeTaskForQueue(task, defaultForce = false) {
     const tagKeyRaw = typeof task?.tagKey === 'string' ? task.tagKey.trim() : '';
     const fileKey = fileKeyRaw || getFileKeyFromTarget(target);
     const tagKey = tagKeyRaw || getTagKeyForScript(script);
+    const taskKey = typeof task?.taskKey === 'string' ? task.taskKey.trim() : (tagKey || getTaskKeyForScript(script));
 
     return {
         script,
         target,
         force,
         fileKey,
-        tagKey
+        tagKey,
+        taskKey
     };
 }
 
 function taskToEntry(task) {
+    const fileKey = task?.fileKey || getFileKeyFromTarget(task?.target);
+    const taskKey = task?.taskKey || task?.tagKey || getTaskKeyForScript(task?.script) || getTagKeyForScript(task?.script);
     return {
-        fileKey: task?.fileKey || getFileKeyFromTarget(task?.target),
-        tagKey: task?.tagKey || getTagKeyForScript(task?.script)
+        fileKey,
+        taskKey,
+        tagKey: taskKey,   // backward-compat alias
+        taskId: makeTaskId(taskKey, fileKey)
     };
 }
 
@@ -841,10 +875,200 @@ function sanitizeTarget(value) {
     const normalized = toPosix(value).replace(/^\/+/, '').trim();
     if (!normalized) return null;
 
-    const resolved = safeResolve(DATA_DIR, normalized);
-    if (!resolved || !fs.existsSync(resolved)) return null;
+    // Safety check: path must be within DATA_DIR
+    if (!safeResolve(DATA_DIR, normalized)) return null;
 
-    return findPreferredAudioCandidate(normalized, 'wav');
+    // Resolve to the best available audio candidate (handles extension-less stems)
+    const candidate = findPreferredAudioCandidate(normalized, 'wav');
+    const candidateAbs = safeResolve(DATA_DIR, candidate);
+    if (!candidateAbs || !fs.existsSync(candidateAbs)) return null;
+
+    return candidate;
+}
+
+// ── Run a script that needs no InputPath/OutputPath (e.g. run-sd-copy.ps1) ──
+function runNoFileTask(scriptName, onChunk = null) {
+    return new Promise((resolve) => {
+        const scriptPath = path.join(ROOT, scriptName);
+        const args = [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            scriptPath
+        ];
+        console.log(`[script:start] ${scriptName} (no-file)`);
+        const startedAt = Date.now();
+        const child = spawn('powershell.exe', args, { cwd: ROOT });
+        activeScriptChild = child;
+        activeScriptChildAbortReason = null;
+
+        let stdout = '';
+        let stderr = '';
+
+        child.stdout.on('data', (chunk) => {
+            const text = chunk.toString();
+            stdout += text;
+            process.stdout.write(`[script:stdout:${scriptName}] ${text}`);
+            if (onChunk) onChunk({ stream: 'stdout', text, script: scriptName });
+        });
+
+        child.stderr.on('data', (chunk) => {
+            const text = chunk.toString();
+            stderr += text;
+            process.stderr.write(`[script:stderr:${scriptName}] ${text}`);
+            if (onChunk) onChunk({ stream: 'stderr', text, script: scriptName });
+        });
+
+        child.on('close', (code) => {
+            if (activeScriptChild === child) activeScriptChild = null;
+            const abortedBy = activeScriptChildAbortReason;
+            activeScriptChildAbortReason = null;
+            console.log(`[script:end] ${scriptName} | code=${code} | durationMs=${Date.now() - startedAt}`);
+            resolve({ script: scriptName, ok: code === 0, code, durationMs: Date.now() - startedAt, stdout, stderr, abortedBy });
+        });
+    });
+}
+
+// ── Server-side task queue helpers ───────────────────────────────────────────
+
+function broadcastQueueChanged() {
+    const payload = { type: 'queue-changed', queue: taskQueue.slice() };
+    scriptStateClients.forEach((res) => sseWrite(res, 'queue-changed', payload));
+}
+
+function enqueueTask(taskKey, fileKey) {
+    const taskId = makeTaskId(taskKey, fileKey || null);
+    if (!taskId) return null;
+    // Deduplicate: skip if already in queue or currently running
+    const alreadyQueued = taskQueue.some((e) => e.taskId === taskId);
+    if (alreadyQueued) return null;
+    const entry = { taskKey, fileKey: fileKey || null, taskId };
+    taskQueue.push(entry);
+    broadcastQueueChanged();
+    return entry;
+}
+
+function dequeueTask(taskId) {
+    const before = taskQueue.length;
+    taskQueue = taskQueue.filter((e) => e.taskId !== taskId);
+    if (taskQueue.length !== before) {
+        broadcastQueueChanged();
+    }
+}
+
+function maybeStartNextFromQueue() {
+    if (activeScriptRunId || taskQueue.length === 0) return;
+    const entries = taskQueue.splice(0);
+    broadcastQueueChanged();
+    executeQueueEntries(entries).catch((err) => {
+        console.error('[queue] executeQueueEntries error:', err);
+    });
+}
+
+async function executeQueueEntries(entries) {
+    const runId = createRunId();
+    activeScriptRunId = runId;
+    activeRunControl.stopRequested = false;
+    activeRunControl.skipRequested = false;
+    activeScriptChild = null;
+    activeScriptChildAbortReason = null;
+
+    const runState = ensureScriptRunState(runId);
+    runState.status = 'running';
+    runState.startedAt = Date.now();
+    runState.endedAt = null;
+    runState.force = false;
+    runState.continueOnError = true;
+    runState.currentTask = null;
+    runState.currentEntry = null;
+    runState.pendingEntries = entries.map((e) => ({ taskKey: e.taskKey, fileKey: e.fileKey, taskId: e.taskId }));
+    runState.pendingTasks = [];
+    runState.summary = null;
+    runState.events = [];
+
+    broadcastScriptLog(runId, { type: 'run-start', runId, taskCount: entries.length });
+
+    const results = [];
+    let stopped = false;
+
+    for (const entry of entries) {
+        if (activeRunControl.stopRequested) {
+            stopped = true;
+            break;
+        }
+
+        const { taskKey, fileKey } = entry;
+        const factory = TASK_FACTORY[taskKey];
+        if (!factory) {
+            results.push({ taskKey, ok: false, skipped: true, reason: 'Unknown taskKey' });
+            continue;
+        }
+
+        runState.currentEntry = { taskKey, fileKey: fileKey || null, taskId: entry.taskId };
+        runState.pendingEntries = runState.pendingEntries.filter((e) => e.taskId !== entry.taskId);
+        broadcastScriptStateSnapshot('task-start');
+
+        if (!factory.needsFile) {
+            // Global task (e.g. copyfromsd)
+            broadcastScriptLog(runId, { type: 'task-start', taskKey, inputPath: null, outputPath: null });
+            const result = await runNoFileTask(factory.script, (chunkInfo) => {
+                broadcastScriptLog(runId, { type: 'chunk', ...chunkInfo });
+            });
+            results.push({ taskKey, ...result });
+            broadcastScriptLog(runId, { type: 'task-end', taskKey, ok: result.ok, code: result.code, durationMs: result.durationMs });
+        } else {
+            // File-based task
+            const target = sanitizeTarget(fileKey);
+            if (!target) {
+                results.push({ taskKey, fileKey, ok: false, skipped: true, reason: 'Invalid or missing target file' });
+                broadcastScriptLog(runId, { type: 'result', taskKey, inputPath: fileKey, ok: false, skipped: true, reason: 'Invalid target' });
+                continue;
+            }
+
+            const outputRel = buildOutputForScript(factory.script, target);
+            const outputAbs = outputRel ? safeResolve(DATA_DIR, outputRel) : null;
+            const inputAbs = safeResolve(DATA_DIR, target);
+
+            broadcastScriptLog(runId, { type: 'task-start', taskKey, script: factory.script, inputPath: target, outputPath: outputRel });
+
+            const result = await runScript(
+                factory.script,
+                inputAbs,
+                outputAbs,
+                target,
+                outputRel,
+                (chunkInfo) => broadcastScriptLog(runId, { type: 'chunk', ...chunkInfo })
+            );
+
+            results.push({ taskKey, fileKey, ...result });
+
+            if (result.abortedBy === 'stop') {
+                broadcastScriptLog(runId, { type: 'task-end', taskKey, ok: false, code: result.code, durationMs: result.durationMs });
+                stopped = true;
+                break;
+            }
+            broadcastScriptLog(runId, { type: 'task-end', taskKey, ok: result.ok, code: result.code, durationMs: result.durationMs });
+            activeRunControl.skipRequested = false;
+        }
+    }
+
+    const total = results.length;
+    const success = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok && !r.skipped).length;
+    const summary = { total, success, failed, stopped };
+    runState.status = 'done';
+    runState.endedAt = Date.now();
+    runState.summary = summary;
+    runState.currentTask = null;
+    runState.currentEntry = null;
+    runState.pendingEntries = [];
+    activeScriptRunId = null;
+
+    broadcastScriptLog(runId, { type: 'run-end', runId, summary });
+    broadcastScriptStateSnapshot('run-end');
+    pruneScriptRunStates();
+    maybeStartNextFromQueue();
 }
 
 const server = http.createServer((req, res) => {
@@ -1458,6 +1682,68 @@ const server = http.createServer((req, res) => {
         return sendJson(res, 405, { error: 'Method not allowed' });
     }
 
+    // ── Server-owned task queue endpoints ──────────────────────────────────
+
+    if (pathname === '/api/queue' && req.method === 'GET') {
+        const activeEntry = activeScriptRunId
+            ? scriptRunStates.get(activeScriptRunId)?.currentEntry || null
+            : null;
+        return sendJson(res, 200, {
+            queue: taskQueue.slice(),
+            activeRunId: activeScriptRunId || null,
+            activeEntry
+        });
+    }
+
+    if (pathname === '/api/queue/enqueue' && req.method === 'POST') {
+        (async () => {
+            try {
+                const body = await readBody(req);
+                const parsed = JSON.parse(body || '{}');
+                const taskKey = typeof parsed.taskKey === 'string' ? parsed.taskKey.trim() : null;
+                const fileKey = typeof parsed.fileKey === 'string' ? parsed.fileKey.trim() || null : null;
+
+                if (!taskKey || !TASK_FACTORY[taskKey]) {
+                    return sendJson(res, 400, { error: 'Invalid taskKey', allowed: Object.keys(TASK_FACTORY) });
+                }
+
+                const factory = TASK_FACTORY[taskKey];
+                if (factory.needsFile && !fileKey) {
+                    return sendJson(res, 400, { error: 'fileKey is required for this task' });
+                }
+
+                if (factory.needsFile) {
+                    const target = sanitizeTarget(fileKey);
+                    if (!target) {
+                        return sendJson(res, 400, { error: 'File target not found', fileKey });
+                    }
+                }
+
+                const entry = enqueueTask(taskKey, fileKey);
+                maybeStartNextFromQueue();
+
+                return sendJson(res, 200, {
+                    ok: true,
+                    queued: !!entry,
+                    taskId: makeTaskId(taskKey, fileKey),
+                    queue: taskQueue.slice()
+                });
+            } catch {
+                return sendJson(res, 500, { error: 'Failed to enqueue task' });
+            }
+        })();
+        return;
+    }
+
+    if (pathname.startsWith('/api/queue/') && req.method === 'DELETE') {
+        const taskId = decodeURIComponent(pathname.slice('/api/queue/'.length));
+        if (!taskId) {
+            return sendJson(res, 400, { error: 'Missing taskId' });
+        }
+        dequeueTask(taskId);
+        return sendJson(res, 200, { ok: true, queue: taskQueue.slice() });
+    }
+
     if (pathname.startsWith('/api/')) {
         return sendJson(res, 404, { error: 'Unknown API route' });
     }
@@ -1486,6 +1772,8 @@ const server = http.createServer((req, res) => {
             return res.end('Not found');
         }
     }
+
+    // ── Static file serving ─────────────────────────────────────────────────
 
     if (pathname === '/') {
         pathname = '/index.html';
