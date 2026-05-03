@@ -51,10 +51,3 @@ https://github.com/snakers4/silero-vad
 https://github.com/wiseman/py-webrtcvad
 
 
-TODO 
-à voir pour copilot refactoring tags, tasks...
-Et j'aimerais un bouton qui lance la copie SD + générer les données manquantes mais attention car c'est une tâche spéciale, elle n'est pas liée à un fichier existant donc pas de filestem + tag... juste un id de tâche en qqsorte. 
-
-On pourrait refactorer en partant du principe que tagKey est plutôt un taskKey et on a des tâches avec juste taskKey sans filekey. elle est enqueuée en tant que taskKey = copyfromsd et les autres sont des paires taskKey + fileKey. d'un point de vue logique, un taskkey ne doit pas être lié à un tag en particulier ou à un script. tant que la tâche n'est pas exécutée, c'est juste dans la file un taskKey + fileKey (optionel). et à l'exécution, on a une sorte de factory qui doit dire "c'est ce taskKey donc je fabrique un runnable avec tel ou tel script, et telle ou telle manière de l'aborter. la factory devrait être la seule à savoir lier le script au taskKey. 
-
-pour les tags visuels, à voir comment mapper taskType vers tag et inverse. faut il le faire côté serveur ? côté UI ? est-ce l'ui ou le serveur qui gère l'état des tags pour les fichiers ? 

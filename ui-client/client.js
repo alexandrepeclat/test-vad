@@ -5,6 +5,8 @@ const state = {
     loadedTargets: [],
     scriptFiles: [],
     activeBackendRunId: null,
+    queueTaskIds: new Set(),
+    runPendingTaskIds: new Set(),
     pendingTaskIds: new Set(),
     runningTaskIds: new Set(),
     currentLogStream: null,
@@ -231,12 +233,21 @@ async function serverEnqueueTask(taskKey, fileKey) {
     return payload;
 }
 
+function rebuildPendingTaskIds() {
+    state.pendingTaskIds.clear();
+    state.queueTaskIds.forEach((taskId) => state.pendingTaskIds.add(taskId));
+    state.runPendingTaskIds.forEach((taskId) => state.pendingTaskIds.add(taskId));
+}
+
 function applyServerQueueSnapshot(queue) {
     if (!Array.isArray(queue)) return;
-    state.pendingTaskIds.clear();
+
+    state.queueTaskIds.clear();
     queue.forEach((entry) => {
-        if (entry?.taskId) state.pendingTaskIds.add(entry.taskId);
+        if (entry?.taskId) state.queueTaskIds.add(entry.taskId);
     });
+
+    rebuildPendingTaskIds();
     updateCopyFromSdButton();
     updateScriptQueueInfo();
     renderScriptFileList(state.scriptFiles || []);
@@ -1021,11 +1032,13 @@ function syncQueueFromBackendRun(run) {
         ? pendingEntries.map((e) => normalizeBackendQueueEntry(e)).filter(Boolean)
         : pendingTasks.map((t) => queueEntryFromBackendTask(t)).filter(Boolean);
 
-    state.pendingTaskIds.clear();
+    state.runPendingTaskIds.clear();
     sourceEntries.forEach((entry) => {
         const taskId = entry.taskId || makeTaskId(entry.taskKey, entry.fileKey);
-        if (taskId) state.pendingTaskIds.add(taskId);
+        if (taskId) state.runPendingTaskIds.add(taskId);
     });
+
+    rebuildPendingTaskIds();
 
     updateScriptQueueInfo();
     renderScriptFileList(state.scriptFiles || []);
@@ -1043,8 +1056,11 @@ function buildTaskFromQueueEntry(entry) {
 
 function setRunningTaskById(taskId) {
     if (taskId) {
+        state.queueTaskIds.delete(taskId);
+        state.runPendingTaskIds.delete(taskId);
         state.pendingTaskIds.delete(taskId);
         state.runningTaskIds.add(taskId);
+        rebuildPendingTaskIds();
     }
     updateCopyFromSdButton();
     updateScriptQueueInfo();
@@ -1097,8 +1113,11 @@ function applyScriptLogEntry(entry) {
         const fileKey = entry.fileKey || String(entry.inputPath || '').replace(/\.(mp3|wav)$/i, '') || null;
         const taskId = makeTaskId(taskKey, fileKey);
         if (taskId) {
+            state.queueTaskIds.delete(taskId);
+            state.runPendingTaskIds.delete(taskId);
             state.pendingTaskIds.delete(taskId);
             state.runningTaskIds.add(taskId);
+            rebuildPendingTaskIds();
             updateCopyFromSdButton();
         }
         appendScriptOutput(`> ${entry.taskKey || entry.script} | ${entry.inputPath || '(none)'} -> ${entry.outputPath || '(none)'}`);
@@ -1162,6 +1181,8 @@ function applyBackendStateSnapshot(payload) {
 
     if (!payload.hasActiveRun || !payload.activeRunId) {
         state.activeBackendRunId = null;
+        state.runPendingTaskIds.clear();
+        rebuildPendingTaskIds();
         resetRunningScripts();
         updateScriptQueueInfo();
         renderScriptFileList(state.scriptFiles || []);
@@ -1354,19 +1375,25 @@ async function runSingleTag(detail, taskDef) {
 }
 
 async function enqueueMultipleTasks(entries) {
-    for (const entry of entries) {
-        try {
-            await serverEnqueueTask(entry.taskKey || entry.tagKey, entry.fileKey || null);
-        } catch (err) {
-            console.error(err);
-        }
+    if (!entries || entries.length === 0) return;
+
+    const tasks = entries.map((e) => ({
+        taskKey: e.taskKey || e.tagKey || null,
+        fileKey: e.fileKey || null
+    }));
+
+    const res = await fetch('/api/queue/enqueue-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks })
+    });
+
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        throw new Error(payload.error || 'Erreur lors de l\'enquêtage des tâches.');
     }
-    // Fetch fresh queue state
-    const res = await fetch('/api/queue').catch(() => null);
-    if (res?.ok) {
-        const payload = await res.json().catch(() => null);
-        if (Array.isArray(payload?.queue)) applyServerQueueSnapshot(payload.queue);
-    }
+
+    if (Array.isArray(payload.queue)) applyServerQueueSnapshot(payload.queue);
 }
 
 function buildMissingQueueEntriesForTag(files, taskDef) {
