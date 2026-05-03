@@ -185,7 +185,6 @@ function getRunSnapshot(runId) {
         force: state.force,
         continueOnError: state.continueOnError,
         currentTask: state.currentTask,
-        pendingTasks: state.pendingTasks,
         currentEntry: state.currentEntry,
         pendingEntries: state.pendingEntries,
         summary: state.summary,
@@ -255,7 +254,6 @@ function buildScriptStateSnapshotPayload() {
                 force: snapshot.force,
                 continueOnError: snapshot.continueOnError,
                 currentTask: snapshot.currentTask,
-                pendingTasks: snapshot.pendingTasks,
                 currentEntry: snapshot.currentEntry,
                 pendingEntries: snapshot.pendingEntries,
                 summary: snapshot.summary

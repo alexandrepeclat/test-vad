@@ -860,11 +860,6 @@ async function loadDayList() {
     graphsEl.innerHTML = '<div class="small">Tous les jours sont précochés. Clique sur "Charger les jours" pour afficher les fichiers.</div>';
 }
 
-function createRunId() {
-    const rnd = Math.random().toString(36).slice(2, 10);
-    return `run-${Date.now()}-${rnd}`;
-}
-
 function appendScriptOutput(line) {
     const prev = scriptOutputEl.textContent || '';
     scriptOutputEl.textContent = prev ? `${prev}\n${line}` : line;
@@ -965,55 +960,14 @@ function getTaskKeyForScript(scriptName) {
     return map[scriptName] || def?.key || null;
 }
 
-function getTaskId(fileKey, taskKey) {
-    return makeTaskId(taskKey, fileKey);
-}
-
-function getDetailByInputPath(inputPath) {
-    if (!inputPath) return null;
-    return (state.scriptFiles || []).find((detail) => (
-        detail.processingFile === inputPath
-        || detail.audioFile === inputPath
-        || detail.wavFile === inputPath
-        || detail.mp3File === inputPath
-    )) || null;
-}
-
-function resolveTaskIdFromTask(taskKey, inputPath) {
-    if (!taskKey) return null;
-    const detail = getDetailByInputPath(inputPath);
-    const fileKey = detail ? getScriptKey(detail) : String(inputPath || '').replace(/\.(mp3|wav)$/i, '');
-    return makeTaskId(taskKey, fileKey || null);
-}
-
 function getScriptKey(detail) {
     const candidate = detail.processingFile || detail.audioFile || detail.displayFile || detail.baseName || '';
     return String(candidate).replace(/\.(mp3|wav)$/i, '');
 }
 
-function findScriptFileByKey(fileKey) {
-    return (state.scriptFiles || []).find((detail) => getScriptKey(detail) === fileKey) || null;
-}
-
-function getTaskDefByKey(taskKey) {
-    return TASK_DEFINITIONS.find((t) => t.key === taskKey) || null;
-}
-
 // createQueueEntry is kept for internal build helpers that enumerate file tasks
 function createQueueEntry(fileKey, taskKey) {
     if (!fileKey || !taskKey) return null;
-    return { fileKey, taskKey, taskId: makeTaskId(taskKey, fileKey) };
-}
-
-function getQueueEntryTaskId(entry) {
-    if (!entry) return null;
-    return entry.taskId || makeTaskId(entry.taskKey || entry.tagKey, entry.fileKey);
-}
-
-function queueEntryFromBackendTask(task) {
-    const taskKey = task?.taskKey || getTaskKeyForScript(task?.script) || null;
-    const fileKey = task?.fileKey || String(task?.target || '').replace(/\.(mp3|wav)$/i, '') || null;
-    if (!taskKey) return null;
     return { fileKey, taskKey, taskId: makeTaskId(taskKey, fileKey) };
 }
 
@@ -1027,10 +981,7 @@ function normalizeBackendQueueEntry(entry) {
 
 function syncQueueFromBackendRun(run) {
     const pendingEntries = Array.isArray(run?.pendingEntries) ? run.pendingEntries : [];
-    const pendingTasks = Array.isArray(run?.pendingTasks) ? run.pendingTasks : [];
-    const sourceEntries = pendingEntries.length > 0
-        ? pendingEntries.map((e) => normalizeBackendQueueEntry(e)).filter(Boolean)
-        : pendingTasks.map((t) => queueEntryFromBackendTask(t)).filter(Boolean);
+    const sourceEntries = pendingEntries.map((e) => normalizeBackendQueueEntry(e)).filter(Boolean);
 
     state.runPendingTaskIds.clear();
     sourceEntries.forEach((entry) => {
@@ -1040,29 +991,6 @@ function syncQueueFromBackendRun(run) {
 
     rebuildPendingTaskIds();
 
-    updateScriptQueueInfo();
-    renderScriptFileList(state.scriptFiles || []);
-}
-
-function buildTaskFromQueueEntry(entry) {
-    const taskDef = getTaskDefByKey(entry?.taskKey || entry?.tagKey);
-    if (!taskDef?.hasScript) return null;
-
-    const detail = findScriptFileByKey(entry.fileKey);
-    if (!detail) return null;
-
-    return getRunnableTaskSpec(detail, taskDef);
-}
-
-function setRunningTaskById(taskId) {
-    if (taskId) {
-        state.queueTaskIds.delete(taskId);
-        state.runPendingTaskIds.delete(taskId);
-        state.pendingTaskIds.delete(taskId);
-        state.runningTaskIds.add(taskId);
-        rebuildPendingTaskIds();
-    }
-    updateCopyFromSdButton();
     updateScriptQueueInfo();
     renderScriptFileList(state.scriptFiles || []);
 }
