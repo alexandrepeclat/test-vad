@@ -51,3 +51,4 @@ https://github.com/snakers4/silero-vad
 https://github.com/wiseman/py-webrtcvad
 
 
+18.05.2026 : 19h30 (bon sample !)

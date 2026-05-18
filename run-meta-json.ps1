@@ -30,7 +30,6 @@ $durationRaw = & $FFPROBE -v error `
     -show_entries format=duration `
     -of default=noprint_wrappers=1:nokey=1 `
     "$inputAbs"
-
 $duration = [double]$durationRaw
 
 $infoRaw = & $FFPROBE -v error `
