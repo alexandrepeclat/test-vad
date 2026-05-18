@@ -31,7 +31,8 @@ const TASK_FACTORY = {
     silero:      { script: 'run-vad-silero.ps1',         needsFile: true  },
     spectrogram: { script: 'run-build-spectrogram.ps1',  needsFile: true  },
     peaks:       { script: 'run-build-peaks.ps1',        needsFile: true  },
-    copyfromsd:  { script: 'run-sd-copy.ps1',            needsFile: false }
+    copyfromsd:    { script: 'run-sd-copy.ps1',            needsFile: false },
+    transcription: { script: 'run-transcr.ps1',             needsFile: true  }
 };
 
 // Server-owned task queue. Each entry: { taskKey, fileKey (or null), taskId }
@@ -450,7 +451,8 @@ function buildFileDetails(audioRelPath) {
         pyannote: `${baseRel}_pyannote.json`,
         silero: `${baseRel}_silero.json`,
         peaks: `${baseRel}_peaks.json`,
-        spectrogram: `${baseRel}_spectrogram.png`
+        spectrogram: `${baseRel}_spectrogram.png`,
+        transcription: `${baseRel}.txt`
     };
 
     const exists = {
@@ -462,7 +464,8 @@ function buildFileDetails(audioRelPath) {
         pyannote: false,
         silero: false,
         peaks: false,
-        spectrogram: false
+        spectrogram: false,
+        transcription: false
     };
 
     let startDate = null;
@@ -624,6 +627,7 @@ function buildOutputForScript(scriptName, targetRelPath) {
     if (scriptName === 'run-vad-silero.ps1') return `${stem}_silero.json`;
     if (scriptName === 'run-build-spectrogram.ps1') return `${stem}_spectrogram.png`;
     if (scriptName === 'run-build-peaks.ps1') return `${stem}_peaks.json`;
+    if (scriptName === 'run-transcr.ps1') return `${stem}.txt`;
     return null;
 }
 

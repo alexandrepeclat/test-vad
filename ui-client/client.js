@@ -44,7 +44,8 @@ const TASK_DEFINITIONS = [
     { key: 'pyannote',    label: 'vadp',   hasScript: true  },
     { key: 'silero',      label: 'vads',   hasScript: true  },
     { key: 'spectrogram', label: 'spectro',hasScript: true  },
-    { key: 'peaks',       label: 'peaks',  hasScript: true  }
+    { key: 'peaks',       label: 'peaks',  hasScript: true  },
+    { key: 'transcription', label: 'tscrb',  hasScript: true  }
 ];
 
 function makeTaskId(taskKey, fileKey) {
